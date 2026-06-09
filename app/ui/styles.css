@@ -1,0 +1,69 @@
+/* 适老化 CSS：高对比度、大字体、大按钮 */
+:root {
+    --primary-bg: #f5f7fa;
+    --text-color: #1a1a1a;
+    --button-primary: #1a3a6b;
+    --button-hover: #122b52;
+    --risk-low: #2e7d32;
+    --risk-med: #f57c00;
+    --risk-high: #c62828;
+}
+
+body {
+    background-color: var(--primary-bg);
+    font-size: 18px !important;
+    color: var(--text-color);
+}
+
+/* 按钮大尺寸，增加可点击区域 */
+button {
+    font-size: 20px !important;
+    min-height: 48px !important;
+    border-radius: 12px !important;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    transition: all 0.2s ease;
+}
+
+button.primary {
+    background-color: var(--button-primary) !important;
+    color: white !important;
+}
+
+button.primary:hover {
+    background-color: var(--button-hover) !important;
+}
+
+/* 文本框大字体 */
+textarea, input {
+    font-size: 20px !important;
+    line-height: 1.5 !important;
+    border-radius: 8px !important;
+    border: 2px solid #ccc !important;
+}
+
+/* 聊天气泡 */
+.message-wrap {
+    font-size: 22px !important;
+    line-height: 1.6 !important;
+}
+
+/* 警示信息，高亮色 */
+.warning-box {
+    background-color: #ffcdd2;
+    color: #c62828;
+    padding: 15px;
+    border-radius: 8px;
+    font-weight: bold;
+    font-size: 20px;
+    margin-top: 10px;
+}
+
+/* 标题加大 */
+h1 { font-size: 32px !important; font-weight: bold !important; color: #1a3a6b !important; }
+h2 { font-size: 28px !important; font-weight: bold !important; }
+h3 { font-size: 24px !important; }
+
+/* 风险颜色 */
+.risk-low { color: var(--risk-low) !important; font-weight: bold; }
+.risk-med { color: var(--risk-med) !important; font-weight: bold; }
+.risk-high { color: var(--risk-high) !important; font-weight: bold; }

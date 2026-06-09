@@ -1,0 +1,13 @@
+gradio==4.44.1
+huggingface_hub==0.25.2
+fastapi==0.112.2
+starlette==0.38.6
+pydantic==2.8.2
+httpx
+openai-whisper
+pyttsx3
+reportlab
+matplotlib
+pyaudio
+sounddevice
+sqlalchemy
