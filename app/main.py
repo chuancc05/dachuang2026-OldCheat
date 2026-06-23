@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-import os
 import time
+import random
+from functools import lru_cache
 from pathlib import Path
+from threading import Lock
 from typing import Any, Dict, Generator, List, Tuple
 
 import gradio as gr
 
-from app.config import DATA_DIR
+from app.config import DATA_DIR, WHISPER_MODEL
 from app.core import DialogueManager, SCENES
 from app.database import db
 from app.psychology import DIMENSIONS, FraudDetector, PsychologyAnalyzer, ScoreTracker
@@ -17,6 +19,18 @@ from app.report.radar_chart import generate_radar_chart
 
 REPORT_DIR = DATA_DIR / "reports"
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
+_DB_LOCK = Lock()
+_DB_READY = False
+
+
+def _ensure_db() -> None:
+    global _DB_READY
+    if _DB_READY:
+        return
+    with _DB_LOCK:
+        if not _DB_READY:
+            db.init_db()
+            _DB_READY = True
 
 
 def _load_css() -> str:
@@ -31,8 +45,11 @@ def _scene_choices() -> List[str]:
     ]
 
 
-def _scene_id_from_label(label: str) -> str:
-    return label.split("|", 1)[0].strip()
+def _scene_id_from_label(label: str | None) -> str:
+    if not label:
+        return next(iter(SCENES))
+    scene_id = label.split("|", 1)[0].strip()
+    return scene_id if scene_id in SCENES else next(iter(SCENES))
 
 
 def _dimension_label(dim_id: str) -> str:
@@ -54,6 +71,8 @@ def _risk_markdown(score: float) -> str:
 
 
 def _top_dimensions_markdown(state: Dict[str, Any]) -> str:
+    if not state:
+        return "尚未开始评分。"
     tracker: ScoreTracker | None = state.get("tracker")
     if not tracker:
         return "尚未开始评分。"
@@ -65,6 +84,8 @@ def _top_dimensions_markdown(state: Dict[str, Any]) -> str:
 
 
 def _advice_markdown(state: Dict[str, Any]) -> str:
+    if not state:
+        return "选择场景并开始训练后，这里会显示即时建议。"
     tracker: ScoreTracker | None = state.get("tracker")
     if not tracker:
         return "选择场景并开始训练后，这里会显示即时建议。"
@@ -100,6 +121,46 @@ def _fallback_ai_reply(scene_id: str, user_text: str) -> str:
     return f"您先别着急，我这里是{scene.name}相关的专员。这个机会有时间限制，请您先按我说的确认一下。"
 
 
+def _initial_ai_message(scene_id: str) -> str:
+    scene = SCENES.get(scene_id)
+    if scene and scene.openings:
+        return random.choice(scene.openings)
+
+    openings = {
+        "SC-01": [
+            "您好，我是市公安局反诈中心的工作人员。您的身份证信息可能涉及一起洗钱案件，请您现在配合我们核实账户情况。",
+            "您好，这里是某地公安机关。我们发现您的银行卡和一起案件有关，请您保持电话畅通，不要和其他人说。",
+            "您好，我们正在办理一宗金融案件，需要核实您的身份和账户流水。请您找个安静的地方配合调查。",
+        ],
+        "SC-02": [
+            "您好，我是中安财富的理财顾问。我们这边有一款内部稳健项目，收益比银行存款高很多，想给您简单介绍一下。",
+            "您好，我们银行合作平台最近开放了一个短期理财名额，风险很低，年化收益可以到百分之十五。",
+            "您好，我是华辰投资的小李。我们有老师一对一带您做稳健理财，先小额体验也可以。",
+        ],
+        "SC-03": [
+            "您好，我们平台正在招募线上任务体验员，每天在手机上点几下就有佣金，您现在方便了解一下吗？",
+            "您好，我们这边有一个手机兼职任务，操作很简单，完成一单马上返佣，您要不要试一单？",
+            "您好，平台今天有商家数据维护任务，不需要经验，跟着步骤操作就能拿到佣金。",
+        ],
+        "SC-04": [
+            "阿姨您好，我们社区健康服务中心今天有免费专家名额，主要针对睡眠、血压和关节问题，想先给您做个简单登记。",
+            "叔叔您好，我们这边有一场免费的健康讲座，还能领血压仪和体验装，想给您留一个名额。",
+            "您好，我是康养中心的健康顾问。我们最近在做老年慢病回访，想了解一下您的身体情况。",
+        ],
+        "SC-05": [
+            "您好，恭喜您被抽中本次福利活动一等奖，奖金和礼品已经预留，需要您现在确认一下领奖信息。",
+            "您好，这里是活动兑奖中心。您的手机号中了幸运奖，奖金今天内确认后就可以发放。",
+            "您好，系统显示您获得本期公益抽奖资格，奖品价值较高，需要先核实身份信息。",
+        ],
+        "SC-06": [
+            "妈，我手机摔坏了，这是临时号码。学校这边有个费用今天必须处理，您先别打我原来的电话，能不能先帮我一下？",
+            "爸，我现在不方便打电话，手机坏了。老师这边催一个培训费，您先帮我转一下。",
+            "妈，我这边出了点急事，原来的微信登不上了。您先别问太多，能不能先按我说的处理一下？",
+        ],
+    }
+    return random.choice(openings.get(scene_id, ["您好，我这边有一件比较重要的事情需要和您确认一下，麻烦您先听我说。"]))
+
+
 def _new_empty_state() -> Dict[str, Any]:
     return {
         "manager": None,
@@ -116,7 +177,7 @@ def _new_empty_state() -> Dict[str, Any]:
 
 
 def start_training(scene_label: str, difficulty: str) -> Tuple[Dict[str, Any], List[List[str | None]], str, str, str, str, None]:
-    db.init_db()
+    _ensure_db()
     scene_id = _scene_id_from_label(scene_label)
     scene = SCENES[scene_id]
     user = db.get_or_create_user("本地用户")
@@ -139,7 +200,11 @@ def start_training(scene_label: str, difficulty: str) -> Tuple[Dict[str, Any], L
         f"已进入“{scene.name}”训练。请在下方输入或使用语音识别提交回复。"
         "训练中您可以随时说“停止训练”结束。"
     )
-    chat = [[None, opening]]
+    first_ai_text = _initial_ai_message(scene_id)
+    state["manager"].messages.append({"role": "assistant", "content": first_ai_text})
+    state["last_ai_text"] = first_ai_text
+    db.add_dialogue_turn(state["session_id"], "ai", first_ai_text, 0)
+    chat = [[None, opening], [None, first_ai_text]]
     return state, chat, _risk_markdown(0), "尚未开始评分。", _advice_markdown(state), "训练已开始。", None
 
 
@@ -148,6 +213,7 @@ def send_message(
     chat_history: List[List[str | None]],
     state: Dict[str, Any],
 ) -> Generator[Tuple[List[List[str | None]], str, str, str, str, None, str, Dict[str, Any]], None, None]:
+    chat_history = chat_history or []
     if not user_text or not user_text.strip():
         yield chat_history, "", _risk_markdown(0), _top_dimensions_markdown(state), _advice_markdown(state), None, "请输入内容后再发送。", state
         return
@@ -207,6 +273,7 @@ def finish_training(
     chat_history: List[List[str | None]],
     state: Dict[str, Any],
 ) -> Tuple[List[List[str | None]], str, str, str, str | None, str, Dict[str, Any]]:
+    chat_history = chat_history or []
     if not state or not state.get("manager") or not state.get("session_id"):
         return chat_history, _risk_markdown(0), "尚未开始评分。", "请先开始训练。", None, "没有可结束的训练。", state
 
@@ -224,7 +291,8 @@ def finish_training(
     pdf_path = REPORT_DIR / f"session_{state['session_id']}_report.pdf"
 
     generate_radar_chart(named_scores, str(radar_path))
-    scene_name = SCENES[state["scene_id"]].name
+    scene_definition = SCENES[state["scene_id"]]
+    scene_name = scene_definition.name
     summary = f"{analysis} 本次训练共进行 {state['round']} 轮对话，综合风险评分为 {state['tracker'].get_composite_score():.1f}/10。"
     report_path = PDFReportGenerator().generate_report(
         output_path=str(pdf_path),
@@ -234,6 +302,8 @@ def finish_training(
         radar_chart_path=str(radar_path),
         dimension_scores=scores,
         failure_points=_extract_failure_points(history),
+        dialogue_history=history,
+        scene_examples=scene_definition.report_examples[:3],
     )
     db.end_session(state["session_id"], identified_fraud=identified, pdf_report_path=report_path)
 
@@ -259,12 +329,17 @@ def transcribe_audio(audio_path: str | None) -> Tuple[str, str]:
     if not audio_path:
         return "", "请先录音或上传音频。"
     try:
-        from app.voice.whisper_asr import WhisperASR
-
-        text = WhisperASR(model_name="small").transcribe(audio_path)
+        text = _get_asr(WHISPER_MODEL).transcribe(audio_path)
         return text, "语音识别完成，可以修改后发送。"
     except Exception as exc:
         return "", f"语音识别暂不可用：{exc}"
+
+
+@lru_cache(maxsize=2)
+def _get_asr(model_name: str):
+    from app.voice.whisper_asr import WhisperASR
+
+    return WhisperASR(model_name=model_name)
 
 
 def build_app() -> gr.Blocks:
@@ -329,7 +404,7 @@ if __name__ == "__main__":
     log_path = DATA_DIR / "server_boot.log"
     try:
         log_path.write_text("starting\n", encoding="utf-8")
-        db.init_db()
+        _ensure_db()
         build_app().queue().launch(
             server_name="127.0.0.1",
             server_port=7860,

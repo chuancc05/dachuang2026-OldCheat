@@ -1,5 +1,10 @@
-from dataclasses import dataclass
-from typing import Dict
+import json
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class SceneDefinition:
@@ -8,8 +13,13 @@ class SceneDefinition:
     core_tactics: str
     difficulty: str
     backstory: str
+    openings: List[str] = field(default_factory=list)
+    typical_lines: List[str] = field(default_factory=list)
+    report_examples: List[str] = field(default_factory=list)
+    source_sample_ids: List[str] = field(default_factory=list)
+    source: str = "builtin"
 
-SCENES: Dict[str, SceneDefinition] = {
+DEFAULT_SCENES: Dict[str, SceneDefinition] = {
     "SC-01": SceneDefinition(
         id="SC-01",
         name="冒充公检法",
@@ -53,3 +63,45 @@ SCENES: Dict[str, SceneDefinition] = {
         backstory="通过短信或微信冒充受害者的子女，声称手机损坏换了新号码，并以交学费、培训班费用或突发急病为由，催促受害者立刻转账到指定账户。"
     )
 }
+
+
+def _load_external_scenes() -> Dict[str, SceneDefinition]:
+    """
+    Load optional scenario definitions from data/scenario_library.json.
+    This keeps new fraud types data-driven instead of hard-coding every scene.
+    """
+    library_path = Path(__file__).resolve().parents[2] / "data" / "scenario_library.json"
+    if not library_path.exists():
+        return {}
+
+    try:
+        raw = json.loads(library_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("读取动态场景库失败: %s", exc)
+        return {}
+
+    scenes: Dict[str, SceneDefinition] = {}
+    for item in raw.get("scenes", []):
+        try:
+            scene = SceneDefinition(
+                id=str(item["id"]).strip(),
+                name=str(item["name"]).strip(),
+                core_tactics=str(item.get("core_tactics", "")).strip(),
+                difficulty=str(item.get("difficulty", "中难度")).strip(),
+                backstory=str(item.get("backstory", "")).strip(),
+                openings=[str(text).strip() for text in item.get("openings", []) if str(text).strip()],
+                typical_lines=[str(text).strip() for text in item.get("typical_lines", []) if str(text).strip()],
+                report_examples=[str(text).strip() for text in item.get("report_examples", []) if str(text).strip()],
+                source_sample_ids=[str(text).strip() for text in item.get("source_sample_ids", []) if str(text).strip()],
+                source="external",
+            )
+        except Exception as exc:
+            logger.warning("跳过无效动态场景: %s", exc)
+            continue
+        if scene.id and scene.name and scene.backstory:
+            scenes[scene.id] = scene
+
+    return scenes
+
+
+SCENES: Dict[str, SceneDefinition] = {**DEFAULT_SCENES, **_load_external_scenes()}

@@ -2,6 +2,7 @@ import logging
 import json
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+from threading import Lock
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from app.config import DATABASE_URI
@@ -24,13 +25,26 @@ class DatabaseManager:
             connect_args=connect_args,
             echo=False
         )
-        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
+        self.SessionLocal = sessionmaker(
+            autocommit=False,
+            autoflush=False,
+            expire_on_commit=False,
+            bind=self.engine,
+        )
+        self._initialized = False
+        self._init_lock = Lock()
         
     def init_db(self) -> None:
         """初始化数据库，创建所有定义在 models 中的表"""
+        if self._initialized:
+            return
         try:
-            Base.metadata.create_all(bind=self.engine)
-            logger.info("数据库初始化成功，所有表已准备就绪。")
+            with self._init_lock:
+                if self._initialized:
+                    return
+                Base.metadata.create_all(bind=self.engine)
+                self._initialized = True
+                logger.info("数据库初始化成功，所有表已准备就绪。")
         except Exception as e:
             logger.error(f"数据库初始化失败: {e}")
             raise

@@ -1,0 +1,26 @@
+{
+  "input": "C:\\Users\\22852\\OneDrive\\ドキュメント\\2026大创结项+论文写作学习\\teleantifraud_pilot\\outputs\\sample_1000\\sample_manifest_1000_paraformer_hotword_transcribed.csv",
+  "output_csv": "C:\\Users\\22852\\OneDrive\\ドキュメント\\2026大创结项+论文写作学习\\teleantifraud_pilot\\outputs\\sample_1000\\teleantifraud_1000_ai_review.csv",
+  "output_xlsx": "C:\\Users\\22852\\OneDrive\\ドキュメント\\2026大创结项+论文写作学习\\teleantifraud_pilot\\outputs\\sample_1000\\teleantifraud_1000_ai_review.xlsx",
+  "total_rows": 1000,
+  "review_conclusion_counts": {
+    "可直接用": 840,
+    "需轻微清洗": 144,
+    "仅作台账": 16
+  },
+  "system_ready_count": 973,
+  "mapped_scene_counts": {
+    "SC-10 虚假征信修复": 4,
+    "SC-09 虚假贷款诈骗": 240,
+    "SC-13 银行账户异常诈骗": 209,
+    "SC-07 物流快递诈骗": 117,
+    "SC-02 投资理财诈骗": 153,
+    "SC-08 冒充客服退款": 56,
+    "SC-05 虚假中奖": 90,
+    "SC-14 绑架勒索诈骗": 52,
+    "SC-01 冒充公检法": 21,
+    "SC-12 冒充熟人借钱": 41,
+    "待人工细分": 12,
+    "SC-11 医保社保诈骗": 5
+  }
+}

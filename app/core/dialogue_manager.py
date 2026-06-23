@@ -1,6 +1,6 @@
 import time
 from typing import Iterator, List, Dict, Optional
-from app.config import DEFAULT_MODEL, OLLAMA_URL
+from app.config import DEFAULT_MODEL, MAX_CONTEXT_MESSAGES, OLLAMA_URL
 from app.core.prompt_builder import PromptBuilder
 from app.core.ollama_client import OllamaClient
 
@@ -8,11 +8,18 @@ class DialogueManager:
     """
     对话管理器，负责管理单次训练会话的状态、消息历史和安全控制。
     """
-    def __init__(self, scene_id: str, difficulty: Optional[str] = None, model: str = DEFAULT_MODEL):
+    def __init__(
+        self,
+        scene_id: str,
+        difficulty: Optional[str] = None,
+        model: str = DEFAULT_MODEL,
+        max_context_messages: int = MAX_CONTEXT_MESSAGES,
+    ):
         self.scene_id = scene_id
         self.difficulty = difficulty
         self.messages: List[Dict[str, str]] = []
         self.client = OllamaClient(base_url=OLLAMA_URL, model=model)
+        self.max_context_messages = max(2, max_context_messages)
         
         # 记录会话开始时间和最后一次安全提示时间
         self.start_time = time.time()
@@ -40,6 +47,12 @@ class DialogueManager:
             return True
         return False
 
+    def _messages_for_model(self) -> List[Dict[str, str]]:
+        """保留完整历史用于报告，只给模型发送最近上下文以降低延迟。"""
+        system_messages = [msg for msg in self.messages if msg.get("role") == "system"]
+        conversation = [msg for msg in self.messages if msg.get("role") != "system"]
+        return system_messages + conversation[-self.max_context_messages:]
+
     def chat(self, user_input: str) -> Iterator[str]:
         """
         处理用户输入，生成 AI 响应（流式）。
@@ -63,9 +76,12 @@ class DialogueManager:
 
         # 4. 获取并流式输出 AI 响应
         full_response = ""
-        for chunk in self.client.chat_stream(self.messages):
+        for chunk in self.client.chat_stream(self._messages_for_model()):
             full_response += chunk
             yield chunk
 
         # 5. 将完整的 AI 响应加入历史记录
         self.messages.append({"role": "assistant", "content": full_response})
+
+    def close(self) -> None:
+        self.client.close()

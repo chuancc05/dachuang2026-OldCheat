@@ -12,6 +12,15 @@ class PromptBuilder:
             raise ValueError(f"未找到场景 ID: {scene_id}")
 
         difficulty = custom_difficulty if custom_difficulty else scene.difficulty
+        material_prompt = ""
+        if scene.typical_lines:
+            examples = "\n".join([f"- {line}" for line in scene.typical_lines[:5]])
+            material_prompt = (
+                "\n"
+                "本场景有以下来自已复核诈骗语料的参考话术特征。你可以参考其语气、节奏和风险点，"
+                "但不得逐字复述，不得索取真实敏感信息：\n"
+                f"{examples}\n"
+            )
 
         base_prompt = (
             "你正在参与一个反诈骗防范训练模拟系统（AFITS）。\n"
@@ -20,6 +29,7 @@ class PromptBuilder:
             f"背景设定：{scene.backstory}\n"
             f"你需要使用的核心战术：{scene.core_tactics}\n"
             f"当前训练难度设定为：【{difficulty}】。\n"
+            f"{material_prompt}"
             "\n"
             "请遵循以下行为准则：\n"
             "1. 始终保持训练角色，但不得索取真实银行卡、密码、验证码、身份证号、住址等敏感信息。\n"

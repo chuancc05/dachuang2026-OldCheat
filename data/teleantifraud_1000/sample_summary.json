@@ -1,0 +1,35 @@
+{
+  "sample_count": 1000,
+  "audio_zip_verified": true,
+  "audio_paths_found": 1000,
+  "answer_counts": {
+    "fraud": 1000,
+    "咨询客服": 985,
+    "客服诈骗": 310,
+    "银行诈骗": 231,
+    "投资诈骗": 142,
+    "彩票诈骗": 97,
+    "钓鱼诈骗": 86,
+    "绑架诈骗": 83,
+    "身份盗窃": 51,
+    "日常购物": 7,
+    "预约服务": 7,
+    "交通咨询": 1
+  },
+  "fraud_type_counts": {
+    "客服诈骗": 310,
+    "银行诈骗": 231,
+    "投资诈骗": 142,
+    "彩票诈骗": 97,
+    "钓鱼诈骗": 86,
+    "绑架诈骗": 83,
+    "身份盗窃": 51
+  },
+  "scene_counts": {
+    "咨询客服": 985,
+    "日常购物": 7,
+    "预约服务": 7,
+    "交通咨询": 1
+  },
+  "next_step": "Download audio.zip, rerun with --audio-zip and --verify-audio, then transcribe the manifest."
+}
