@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import os
 import time
 import random
 from functools import lru_cache
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, Generator, List, Tuple
+
+os.environ["NO_PROXY"] = "127.0.0.1,localhost"
+os.environ["no_proxy"] = "127.0.0.1,localhost"
+os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
 import gradio as gr
 
@@ -21,6 +26,7 @@ REPORT_DIR = DATA_DIR / "reports"
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
 _DB_LOCK = Lock()
 _DB_READY = False
+MAX_TRAINING_ROUNDS = 10
 
 
 def _ensure_db() -> None:
@@ -67,7 +73,44 @@ def _risk_level(score: float) -> Tuple[str, str]:
 
 def _risk_markdown(score: float) -> str:
     level, cls = _risk_level(score)
-    return f"<div class='{cls}'>当前综合风险：{level}（{score:.1f}/10）</div>"
+    risk_percent = max(0, min(100, int(score * 10)))
+    return (
+        f"<div class='risk-card {cls}'>"
+        "<div class='risk-card-title'>心理风险预警（实时）</div>"
+        f"<div class='risk-meter' style='--risk-percent:{risk_percent}'>"
+        "<div class='risk-meter-inner'></div>"
+        "</div>"
+        f"<div class='risk-score'>风险等级：<strong>{level}</strong></div>"
+        f"<div class='risk-number'>{score:.1f}/10</div>"
+        "</div>"
+    )
+
+
+def _progress_html(state: Dict[str, Any] | None = None) -> str:
+    current_round = int((state or {}).get("round") or 0)
+    progress = min(100, int(current_round / MAX_TRAINING_ROUNDS * 100))
+    return (
+        "<div class='top-progress'>"
+        "<div class='mode-pill'>训练模式：对话训练</div>"
+        "<div class='progress-track'>"
+        f"<div class='progress-fill' style='width:{progress}%'></div>"
+        "</div>"
+        f"<div class='progress-text'>进度：{current_round}/{MAX_TRAINING_ROUNDS}</div>"
+        "</div>"
+    )
+
+
+def _scene_header_html(state: Dict[str, Any] | None = None) -> str:
+    scene_id = (state or {}).get("scene_id")
+    if scene_id and scene_id in SCENES:
+        scene = SCENES[scene_id]
+        return (
+            "<div class='scene-header'>"
+            f"<span>当前场景：{scene.name}</span>"
+            f"<small>{scene.difficulty} · {scene.core_tactics}</small>"
+            "</div>"
+        )
+    return "<div class='scene-header'><span>当前场景：未开始</span><small>请选择左侧场景并开始训练</small></div>"
 
 
 def _top_dimensions_markdown(state: Dict[str, Any]) -> str:
@@ -76,7 +119,7 @@ def _top_dimensions_markdown(state: Dict[str, Any]) -> str:
     tracker: ScoreTracker | None = state.get("tracker")
     if not tracker:
         return "尚未开始评分。"
-    top = tracker.get_top_activated_dimensions(3)
+    top = tracker.get_top_activated_dimensions(5)
     active = [item for item in top if item[1] > 0]
     if not active:
         return "当前未检测到明显心理弱点激活。"
@@ -89,10 +132,9 @@ def _advice_markdown(state: Dict[str, Any]) -> str:
     tracker: ScoreTracker | None = state.get("tracker")
     if not tracker:
         return "选择场景并开始训练后，这里会显示即时建议。"
-    top = tracker.get_top_activated_dimensions(1)
-    if not top or top[0][1] <= 0:
+    top = [item for item in tracker.get_top_activated_dimensions(3) if item[1] > 0]
+    if not top:
         return "保持核实身份、拒绝验证码、拒绝转账的习惯。"
-    dim_id, _score = top[0]
     advice = {
         "E-01": "对方越热情，越要慢下来。陌生人突然关心您时，先确认身份，不要急着透露个人情况。",
         "E-02": "对方制造恐慌时，先挂断，再拨打官方电话或 110 核实。",
@@ -107,7 +149,10 @@ def _advice_markdown(state: Dict[str, Any]) -> str:
         "S-02": "越催越不能办。涉及钱的事至少等十分钟，并找可信的人确认。",
         "S-03": "把陪伴和金钱分开，聊天对象提出转账或投资就立刻停止。",
     }
-    return advice.get(dim_id, "遇到可疑情况，先停止对话，再找家人或官方渠道核实。")
+    lines = []
+    for dim_id, score in top:
+        lines.append(f"- {_dimension_label(dim_id)}（{score:.1f}/10）：{advice.get(dim_id, '遇到可疑情况，先停止对话，再找家人或官方渠道核实。')}")
+    return "\n".join(lines)
 
 
 def _fallback_ai_reply(scene_id: str, user_text: str) -> str:
@@ -173,10 +218,67 @@ def _new_empty_state() -> Dict[str, Any]:
         "round": 0,
         "last_ai_text": "",
         "ended": False,
+        "report_path": None,
     }
 
 
-def start_training(scene_label: str, difficulty: str) -> Tuple[Dict[str, Any], List[List[str | None]], str, str, str, str, None]:
+def _success_intent(text: str) -> bool:
+    return any(word in text for word in ["骗子", "报警", "110", "我不信", "不转", "不给", "不能给", "挂断", "官方电话", "核实", "问家人", "问银行"])
+
+
+def _failure_completion_intent(text: str) -> bool:
+    return any(word in text for word in ["已经操作", "操作完成", "已经转", "转过去", "已经给", "发给你", "验证码是", "密码是", "到ATM", "到atm", "在ATM", "在atm"])
+
+
+def _finalize_training(
+    chat_history: List[List[str | None]],
+    state: Dict[str, Any],
+    final_message: str | None = None,
+) -> Tuple[List[List[str | None]], str, str, str, str | None, str, Dict[str, Any], str, str]:
+    chat_history = chat_history or []
+    if not state or not state.get("manager") or not state.get("session_id"):
+        return chat_history, _risk_markdown(0), "尚未开始评分。", "请先开始训练。", None, "没有可结束的训练。", state, _progress_html(state), _scene_header_html(state)
+
+    if state.get("ended") and state.get("report_path"):
+        return chat_history, _risk_markdown(state["tracker"].get_composite_score()), _top_dimensions_markdown(state), _advice_markdown(state), state["report_path"], "本次训练已结束，报告已生成。", state, _progress_html(state), _scene_header_html(state)
+
+    manager: DialogueManager = state["manager"]
+    history = [
+        msg for msg in manager.messages
+        if msg.get("role") in {"user", "assistant"}
+    ]
+    identified, analysis = state["detector"].evaluate_session(history)
+    state["ended"] = True
+
+    scores = state["tracker"].get_current_smooth_scores()
+    named_scores = {_dimension_label(dim_id): value for dim_id, value in scores.items()}
+    radar_path = REPORT_DIR / f"session_{state['session_id']}_radar.png"
+    pdf_path = REPORT_DIR / f"session_{state['session_id']}_report.pdf"
+
+    generate_radar_chart(named_scores, str(radar_path))
+    scene_definition = SCENES[state["scene_id"]]
+    summary = f"{analysis} 本次训练共进行 {state['round']} 轮对话，综合风险评分为 {state['tracker'].get_composite_score():.1f}/10。"
+    report_path = PDFReportGenerator().generate_report(
+        output_path=str(pdf_path),
+        user_name="本地用户",
+        scene=scene_definition.name,
+        summary=summary,
+        radar_chart_path=str(radar_path),
+        dimension_scores=scores,
+        failure_points=_extract_failure_points(history),
+        dialogue_history=history,
+        scene_examples=scene_definition.report_examples[:3],
+    )
+    state["report_path"] = report_path
+    db.end_session(state["session_id"], identified_fraud=identified, pdf_report_path=report_path)
+
+    result_text = "识别成功" if identified else "仍需练习"
+    end_text = final_message or f"训练结束：{result_text}。{analysis} 报告已生成。"
+    chat_history = chat_history + [[None, end_text]]
+    return chat_history, _risk_markdown(state["tracker"].get_composite_score()), _top_dimensions_markdown(state), _advice_markdown(state), report_path, "报告已生成。", state, _progress_html(state), _scene_header_html(state)
+
+
+def start_training(scene_label: str, difficulty: str) -> Tuple[Dict[str, Any], List[List[str | None]], str, str, str, str, None, str, str]:
     _ensure_db()
     scene_id = _scene_id_from_label(scene_label)
     scene = SCENES[scene_id]
@@ -205,17 +307,17 @@ def start_training(scene_label: str, difficulty: str) -> Tuple[Dict[str, Any], L
     state["last_ai_text"] = first_ai_text
     db.add_dialogue_turn(state["session_id"], "ai", first_ai_text, 0)
     chat = [[None, opening], [None, first_ai_text]]
-    return state, chat, _risk_markdown(0), "尚未开始评分。", _advice_markdown(state), "训练已开始。", None
+    return state, chat, _risk_markdown(0), "尚未开始评分。", _advice_markdown(state), "训练已开始。", None, _progress_html(state), _scene_header_html(state)
 
 
 def send_message(
     user_text: str,
     chat_history: List[List[str | None]],
     state: Dict[str, Any],
-) -> Generator[Tuple[List[List[str | None]], str, str, str, str, None, str, Dict[str, Any]], None, None]:
+) -> Generator[Tuple[List[List[str | None]], str, str, str, str, None, str, Dict[str, Any], str, str], None, None]:
     chat_history = chat_history or []
     if not user_text or not user_text.strip():
-        yield chat_history, "", _risk_markdown(0), _top_dimensions_markdown(state), _advice_markdown(state), None, "请输入内容后再发送。", state
+        yield chat_history, "", _risk_markdown(0), _top_dimensions_markdown(state), _advice_markdown(state), None, "请输入内容后再发送。", state, _progress_html(state), _scene_header_html(state)
         return
 
     if not state or not state.get("manager"):
@@ -223,7 +325,7 @@ def send_message(
         state, chat_history, *_rest = start_training(default_scene, "中")
 
     if state.get("ended"):
-        yield chat_history, "", _risk_markdown(state["tracker"].get_composite_score()), _top_dimensions_markdown(state), _advice_markdown(state), None, "本次训练已结束，请点击开始训练创建新会话。", state
+        yield chat_history, "", _risk_markdown(state["tracker"].get_composite_score()), _top_dimensions_markdown(state), _advice_markdown(state), None, "本次训练已结束，请点击开始训练创建新会话。", state, _progress_html(state), _scene_header_html(state)
         return
 
     manager: DialogueManager = state["manager"]
@@ -232,13 +334,13 @@ def send_message(
     clean_text = user_text.strip()
 
     chat_history = chat_history + [[clean_text, ""]]
-    yield chat_history, "", _risk_markdown(state["tracker"].get_composite_score()), _top_dimensions_markdown(state), _advice_markdown(state), None, "AI 正在回复。", state
+    yield chat_history, "", _risk_markdown(state["tracker"].get_composite_score()), _top_dimensions_markdown(state), _advice_markdown(state), None, "AI 正在回复。", state, _progress_html(state), _scene_header_html(state)
 
     full_response = ""
     for chunk in manager.chat(clean_text):
         full_response += chunk
         chat_history[-1][1] = full_response
-        yield chat_history, "", _risk_markdown(state["tracker"].get_composite_score()), _top_dimensions_markdown(state), _advice_markdown(state), None, "AI 正在回复。", state
+        yield chat_history, "", _risk_markdown(state["tracker"].get_composite_score()), _top_dimensions_markdown(state), _advice_markdown(state), None, "AI 正在回复。", state, _progress_html(state), _scene_header_html(state)
 
     if "[连接错误" in full_response or "[发生错误" in full_response:
         full_response = _fallback_ai_reply(state["scene_id"], clean_text)
@@ -261,55 +363,32 @@ def send_message(
     state["last_ai_text"] = full_response
 
     if manager.is_emergency_stop(clean_text):
-        state["ended"] = True
-        status = "用户触发停止词，训练已结束。可以生成报告。"
-    else:
-        status = "本轮评分已更新。"
+        final = _finalize_training(chat_history, state, "训练已按您的要求停止，系统已生成本次报告。")
+        yield final[0], "", final[1], final[2], final[3], final[4], final[5], final[6], final[7], final[8]
+        return
+    if _success_intent(clean_text):
+        final = _finalize_training(chat_history, state, "您已经做出拒绝或核实行为，本次训练自动结束，系统已生成报告。")
+        yield final[0], "", final[1], final[2], final[3], final[4], final[5], final[6], final[7], final[8]
+        return
+    if _failure_completion_intent(clean_text):
+        final = _finalize_training(chat_history, state, "系统检测到您已经按对方要求执行高风险操作，本次训练自动结束并生成报告。")
+        yield final[0], "", final[1], final[2], final[3], final[4], final[5], final[6], final[7], final[8]
+        return
+    if state["round"] >= MAX_TRAINING_ROUNDS:
+        final = _finalize_training(chat_history, state, "本次训练已达到建议轮次，系统自动结束并生成报告。")
+        yield final[0], "", final[1], final[2], final[3], final[4], final[5], final[6], final[7], final[8]
+        return
 
-    yield chat_history, "", _risk_markdown(composite), _top_dimensions_markdown(state), _advice_markdown(state), None, status, state
+    status = "本轮评分已更新。"
+
+    yield chat_history, "", _risk_markdown(composite), _top_dimensions_markdown(state), _advice_markdown(state), None, status, state, _progress_html(state), _scene_header_html(state)
 
 
 def finish_training(
     chat_history: List[List[str | None]],
     state: Dict[str, Any],
-) -> Tuple[List[List[str | None]], str, str, str, str | None, str, Dict[str, Any]]:
-    chat_history = chat_history or []
-    if not state or not state.get("manager") or not state.get("session_id"):
-        return chat_history, _risk_markdown(0), "尚未开始评分。", "请先开始训练。", None, "没有可结束的训练。", state
-
-    manager: DialogueManager = state["manager"]
-    history = [
-        msg for msg in manager.messages
-        if msg.get("role") in {"user", "assistant"}
-    ]
-    identified, analysis = state["detector"].evaluate_session(history)
-    state["ended"] = True
-
-    scores = state["tracker"].get_current_smooth_scores()
-    named_scores = {_dimension_label(dim_id): value for dim_id, value in scores.items()}
-    radar_path = REPORT_DIR / f"session_{state['session_id']}_radar.png"
-    pdf_path = REPORT_DIR / f"session_{state['session_id']}_report.pdf"
-
-    generate_radar_chart(named_scores, str(radar_path))
-    scene_definition = SCENES[state["scene_id"]]
-    scene_name = scene_definition.name
-    summary = f"{analysis} 本次训练共进行 {state['round']} 轮对话，综合风险评分为 {state['tracker'].get_composite_score():.1f}/10。"
-    report_path = PDFReportGenerator().generate_report(
-        output_path=str(pdf_path),
-        user_name="本地用户",
-        scene=scene_name,
-        summary=summary,
-        radar_chart_path=str(radar_path),
-        dimension_scores=scores,
-        failure_points=_extract_failure_points(history),
-        dialogue_history=history,
-        scene_examples=scene_definition.report_examples[:3],
-    )
-    db.end_session(state["session_id"], identified_fraud=identified, pdf_report_path=report_path)
-
-    result_text = "识别成功" if identified else "仍需练习"
-    chat_history = chat_history + [[None, f"训练结束：{result_text}。{analysis} 报告已生成。"]]
-    return chat_history, _risk_markdown(state["tracker"].get_composite_score()), _top_dimensions_markdown(state), _advice_markdown(state), report_path, "报告已生成。", state
+) -> Tuple[List[List[str | None]], str, str, str, str | None, str, Dict[str, Any], str, str]:
+    return _finalize_training(chat_history, state)
 
 
 def _extract_failure_points(history: List[Dict[str, str]]) -> List[str]:
@@ -335,6 +414,23 @@ def transcribe_audio(audio_path: str | None) -> Tuple[str, str]:
         return "", f"语音识别暂不可用：{exc}"
 
 
+def send_text_or_audio(
+    user_text: str,
+    audio_path: str | None,
+    chat_history: List[List[str | None]],
+    state: Dict[str, Any],
+) -> Generator[Tuple[List[List[str | None]], str, str, str, str, None, str, Dict[str, Any], str, str], None, None]:
+    text = (user_text or "").strip()
+    if not text and audio_path:
+        yield chat_history or [], "", _risk_markdown(state["tracker"].get_composite_score() if state and state.get("tracker") else 0), _top_dimensions_markdown(state), _advice_markdown(state), None, "正在识别语音，请稍候。", state, _progress_html(state), _scene_header_html(state)
+        text, status = transcribe_audio(audio_path)
+        if not text:
+            yield chat_history or [], "", _risk_markdown(state["tracker"].get_composite_score() if state and state.get("tracker") else 0), _top_dimensions_markdown(state), _advice_markdown(state), None, status, state, _progress_html(state), _scene_header_html(state)
+            return
+
+    yield from send_message(text, chat_history, state)
+
+
 @lru_cache(maxsize=2)
 def _get_asr(model_name: str):
     from app.voice.whisper_asr import WhisperASR
@@ -342,60 +438,127 @@ def _get_asr(model_name: str):
     return WhisperASR(model_name=model_name)
 
 
+def replay_last_ai(state: Dict[str, Any]) -> str:
+    last_ai_text = (state or {}).get("last_ai_text")
+    if not last_ai_text:
+        return "尚无上一条 AI 对话。"
+    return f"上一条 AI 话术：{last_ai_text}"
+
+
+def show_safety_tip() -> str:
+    return "防诈提示：公检法、银行、客服不会要求您转账、提供验证码或屏幕共享。遇到催促时，先停下并找家人核实。"
+
+
+def show_help_tip() -> str:
+    return "求助建议：请立即联系家人、社区工作人员或拨打 110；不要继续和可疑来电保持单独通话。"
+
+
 def build_app() -> gr.Blocks:
     with gr.Blocks(css=_load_css(), title="老年人电信诈骗沉浸式心理免疫训练系统") as demo:
-        gr.Markdown("# 老年人电信诈骗沉浸式心理免疫训练系统")
         app_state = gr.State(_new_empty_state())
 
-        with gr.Row():
-            with gr.Column(scale=1, min_width=260):
-                scene_dropdown = gr.Dropdown(
+        with gr.Row(elem_classes=["topbar"]):
+            gr.HTML(
+                "<div class='brand'>"
+                "<div class='brand-mark'>人</div>"
+                "<div class='brand-copy'>"
+                "<strong>老年用户防诈训练系统</strong>"
+                "<span>沉浸式心理免疫训练</span>"
+                "</div>"
+                "</div>"
+            )
+            progress_bar = gr.HTML(_progress_html(_new_empty_state()))
+            gr.HTML(
+                "<div class='top-actions'>"
+                "<span>首页</span><span>帮助</span><span>设置</span>"
+                "</div>"
+            )
+
+        with gr.Row(elem_classes=["main-layout"]):
+            with gr.Column(scale=1, min_width=250, elem_classes=["scene-panel"]):
+                gr.Markdown("### 场景选择")
+                scene_dropdown = gr.Radio(
                     choices=_scene_choices(),
                     value=_scene_choices()[0],
-                    label="训练场景",
+                    label=None,
+                    elem_classes=["scene-list"],
                 )
                 difficulty = gr.Radio(["低", "中", "高"], value="中", label="训练强度")
-                start_btn = gr.Button("开始训练", variant="primary")
-                finish_btn = gr.Button("结束训练并生成报告")
-                status = gr.Markdown("请选择场景后开始训练。")
+                start_btn = gr.Button("开始训练", variant="primary", elem_classes=["start-btn"])
+                finish_btn = gr.Button("结束训练并生成报告", elem_classes=["finish-btn"])
+                gr.Markdown("### 快捷操作")
+                replay_btn = gr.Button("重听上一条", elem_classes=["assist-btn"])
+                safe_tip_btn = gr.Button("查看防诈提示", elem_classes=["assist-btn"])
+                help_btn = gr.Button("求助家人 / 客服", elem_classes=["assist-btn"])
+                status = gr.Markdown("请选择场景后开始训练。", elem_classes=["status-box"])
 
-            with gr.Column(scale=2, min_width=460):
-                chatbot = gr.Chatbot(label="对话训练", height=560)
-                text_input = gr.Textbox(label="文字输入", placeholder="在这里输入您的回复", lines=2)
-                with gr.Row():
-                    send_btn = gr.Button("发送", variant="primary")
-                    clear_btn = gr.Button("清空输入")
-                audio_input = gr.Audio(sources=["microphone", "upload"], type="filepath", label="语音输入")
-                transcribe_btn = gr.Button("识别语音到输入框")
+            with gr.Column(scale=3, min_width=560, elem_classes=["dialogue-panel"]):
+                scene_header = gr.HTML(_scene_header_html(_new_empty_state()))
+                chatbot = gr.Chatbot(label="对话训练", height=500, elem_classes=["training-chat"])
+                with gr.Group(elem_classes=["input-dock"]):
+                    with gr.Row(elem_classes=["input-row"]):
+                        text_input = gr.Textbox(
+                            label="文字输入",
+                            placeholder="请输入您的回复，也可以录音后直接发送",
+                            lines=2,
+                            scale=5,
+                        )
+                        send_btn = gr.Button("发送", variant="primary", scale=1, elem_classes=["send-btn"])
+                    audio_input = gr.Audio(
+                        sources=["microphone", "upload"],
+                        type="filepath",
+                        label="语音输入",
+                        elem_classes=["audio-input"],
+                    )
+                    transcribe_btn = gr.Button("识别语音到输入框", elem_classes=["transcribe-btn"])
+                gr.HTML(
+                    "<div class='safe-tip'>"
+                    "<strong>提示：</strong>公检法、银行和客服不会要求转账、提供验证码或屏幕共享。"
+                    "</div>"
+                )
 
-            with gr.Column(scale=1, min_width=280):
-                risk_level = gr.HTML(_risk_markdown(0), label="风险等级")
-                top_dimensions = gr.Markdown("尚未开始评分。", label="主要心理弱点")
-                advice = gr.Markdown("选择场景并开始训练后，这里会显示即时建议。", label="即时建议")
-                report_file = gr.File(label="PDF 报告")
+            with gr.Column(scale=1, min_width=310, elem_classes=["risk-panel"]):
+                risk_level = gr.HTML(_risk_markdown(0))
+                with gr.Group(elem_classes=["analysis-card"]):
+                    gr.Markdown("### 主要触发因素")
+                    top_dimensions = gr.Markdown("尚未开始评分。")
+                with gr.Group(elem_classes=["analysis-card advice-card"]):
+                    gr.Markdown("### 应对建议")
+                    advice = gr.Markdown("选择场景并开始训练后，这里会显示即时建议。")
+                report_file = gr.File(label="PDF 报告", elem_classes=["report-file"])
+
+        with gr.Row(elem_classes=["bottom-assist"]):
+            gr.HTML("<span>辅助功能</span>")
+            gr.HTML("<span>大按钮操作</span>")
+            gr.HTML("<span>语音与文字双输入</span>")
+            with gr.Row(elem_classes=["bottom-actions"]):
+                clear_btn = gr.Button("清空输入")
 
         start_btn.click(
             start_training,
             inputs=[scene_dropdown, difficulty],
-            outputs=[app_state, chatbot, risk_level, top_dimensions, advice, status, report_file],
+            outputs=[app_state, chatbot, risk_level, top_dimensions, advice, status, report_file, progress_bar, scene_header],
         )
         send_btn.click(
-            send_message,
-            inputs=[text_input, chatbot, app_state],
-            outputs=[chatbot, text_input, risk_level, top_dimensions, advice, report_file, status, app_state],
+            send_text_or_audio,
+            inputs=[text_input, audio_input, chatbot, app_state],
+            outputs=[chatbot, text_input, risk_level, top_dimensions, advice, report_file, status, app_state, progress_bar, scene_header],
         )
         text_input.submit(
             send_message,
             inputs=[text_input, chatbot, app_state],
-            outputs=[chatbot, text_input, risk_level, top_dimensions, advice, report_file, status, app_state],
+            outputs=[chatbot, text_input, risk_level, top_dimensions, advice, report_file, status, app_state, progress_bar, scene_header],
         )
         finish_btn.click(
             finish_training,
             inputs=[chatbot, app_state],
-            outputs=[chatbot, risk_level, top_dimensions, advice, report_file, status, app_state],
+            outputs=[chatbot, risk_level, top_dimensions, advice, report_file, status, app_state, progress_bar, scene_header],
         )
         transcribe_btn.click(transcribe_audio, inputs=[audio_input], outputs=[text_input, status])
         clear_btn.click(lambda: "", outputs=[text_input])
+        replay_btn.click(replay_last_ai, inputs=[app_state], outputs=[status])
+        safe_tip_btn.click(show_safety_tip, outputs=[status])
+        help_btn.click(show_help_tip, outputs=[status])
 
     return demo
 
@@ -403,6 +566,9 @@ def build_app() -> gr.Blocks:
 if __name__ == "__main__":
     log_path = DATA_DIR / "server_boot.log"
     try:
+        import gradio.networking as gradio_networking
+
+        gradio_networking.url_ok = lambda _url: True
         log_path.write_text("starting\n", encoding="utf-8")
         _ensure_db()
         build_app().queue().launch(

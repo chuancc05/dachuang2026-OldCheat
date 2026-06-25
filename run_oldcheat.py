@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_DIR))
+os.environ["NO_PROXY"] = "127.0.0.1,localhost"
+os.environ["no_proxy"] = "127.0.0.1,localhost"
+os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
 import huggingface_hub
 
@@ -47,8 +51,15 @@ from app import main
 
 
 if __name__ == "__main__":
+    import gradio.networking as gradio_networking
+
+    # Local demos can run behind strict proxy settings; keep Gradio from
+    # aborting after its localhost self-check while still serving 127.0.0.1.
+    gradio_networking.url_ok = lambda _url: True
+    print("正在初始化数据库和界面，请稍候...")
     main._ensure_db()
     app = main.build_app()
+    print("启动成功后请打开：http://127.0.0.1:7860/")
     app.queue().launch(
         server_name="127.0.0.1",
         server_port=7860,
