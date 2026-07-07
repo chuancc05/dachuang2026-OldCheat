@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import html
 import time
 import random
 from functools import lru_cache
@@ -16,6 +17,7 @@ import gradio as gr
 
 from app.config import DATA_DIR, WHISPER_MODEL
 from app.core import DialogueManager, SCENES
+from app.core.material_library import choose_material_reply
 from app.database import db
 from app.psychology import DIMENSIONS, FraudDetector, PsychologyAnalyzer, ScoreTracker
 from app.report.pdf_generator import PDFReportGenerator
@@ -44,11 +46,29 @@ def _load_css() -> str:
     return css_path.read_text(encoding="utf-8") if css_path.exists() else ""
 
 
+MORE_SCENE_PLACEHOLDER = "不使用更多场景"
+COMMON_SCENE_COUNT = 6
+
+
 def _scene_choices() -> List[str]:
     return [
         f"{scene_id} | {scene.name} | {scene.difficulty}"
         for scene_id, scene in SCENES.items()
     ]
+
+
+def _common_scene_choices() -> List[str]:
+    return _scene_choices()[:COMMON_SCENE_COUNT]
+
+
+def _more_scene_choices() -> List[str]:
+    return [MORE_SCENE_PLACEHOLDER] + _scene_choices()[COMMON_SCENE_COUNT:]
+
+
+def _resolve_scene_label(common_label: str | None, more_label: str | None) -> str:
+    if more_label and more_label != MORE_SCENE_PLACEHOLDER:
+        return more_label
+    return common_label or _scene_choices()[0]
 
 
 def _scene_id_from_label(label: str | None) -> str:
@@ -113,28 +133,54 @@ def _scene_header_html(state: Dict[str, Any] | None = None) -> str:
     return "<div class='scene-header'><span>当前场景：未开始</span><small>请选择左侧场景并开始训练</small></div>"
 
 
+def _score_bar(score: float) -> str:
+    percent = max(0, min(100, int(score * 10)))
+    return f"<span class='score-bar'><span style='width:{percent}%'></span></span>"
+
+
+def _empty_panel(text: str) -> str:
+    return f"<div class='empty-note'>{html.escape(text)}</div>"
+
+
 def _top_dimensions_markdown(state: Dict[str, Any]) -> str:
     if not state:
-        return "尚未开始评分。"
+        return _empty_panel("尚未开始评分。")
     tracker: ScoreTracker | None = state.get("tracker")
     if not tracker:
-        return "尚未开始评分。"
+        return _empty_panel("尚未开始评分。")
     top = tracker.get_top_activated_dimensions(5)
     active = [item for item in top if item[1] > 0]
     if not active:
-        return "当前未检测到明显心理弱点激活。"
-    return "\n".join([f"- {_dimension_label(dim_id)}：{score:.1f}/10" for dim_id, score in active])
+        return _empty_panel("当前未检测到明显心理弱点激活。")
+
+    rows = []
+    for dim_id, score in active:
+        label = html.escape(_dimension_label(dim_id))
+        level = "高" if score >= 6 else "中" if score >= 3 else "低"
+        rows.append(
+            "<div class='factor-row'>"
+            f"<div class='factor-main'><strong>{label}</strong><small>触发强度：{level}</small></div>"
+            f"<div class='factor-score'>{score:.1f}/10</div>"
+            f"{_score_bar(score)}"
+            "</div>"
+        )
+    return "<div class='factor-list'>" + "".join(rows) + "</div>"
 
 
 def _advice_markdown(state: Dict[str, Any]) -> str:
     if not state:
-        return "选择场景并开始训练后，这里会显示即时建议。"
+        return _empty_panel("选择场景并开始训练后，这里会显示即时建议。")
     tracker: ScoreTracker | None = state.get("tracker")
     if not tracker:
-        return "选择场景并开始训练后，这里会显示即时建议。"
+        return _empty_panel("选择场景并开始训练后，这里会显示即时建议。")
     top = [item for item in tracker.get_top_activated_dimensions(3) if item[1] > 0]
     if not top:
-        return "保持核实身份、拒绝验证码、拒绝转账的习惯。"
+        return (
+            "<div class='advice-list'>"
+            "<div class='advice-item'><strong>基础策略</strong>"
+            "<p>保持核实身份、拒绝验证码、拒绝转账的习惯。</p></div>"
+            "</div>"
+        )
     advice = {
         "E-01": "对方越热情，越要慢下来。陌生人突然关心您时，先确认身份，不要急着透露个人情况。",
         "E-02": "对方制造恐慌时，先挂断，再拨打官方电话或 110 核实。",
@@ -149,16 +195,26 @@ def _advice_markdown(state: Dict[str, Any]) -> str:
         "S-02": "越催越不能办。涉及钱的事至少等十分钟，并找可信的人确认。",
         "S-03": "把陪伴和金钱分开，聊天对象提出转账或投资就立刻停止。",
     }
-    lines = []
+    rows = []
     for dim_id, score in top:
-        lines.append(f"- {_dimension_label(dim_id)}（{score:.1f}/10）：{advice.get(dim_id, '遇到可疑情况，先停止对话，再找家人或官方渠道核实。')}")
-    return "\n".join(lines)
+        label = html.escape(_dimension_label(dim_id))
+        suggestion = html.escape(advice.get(dim_id, "遇到可疑情况，先停止对话，再找家人或官方渠道核实。"))
+        rows.append(
+            "<div class='advice-item'>"
+            f"<strong>{label}<span>{score:.1f}/10</span></strong>"
+            f"<p>{suggestion}</p>"
+            "</div>"
+        )
+    return "<div class='advice-list'>" + "".join(rows) + "</div>"
 
 
 def _fallback_ai_reply(scene_id: str, user_text: str) -> str:
     scene = SCENES[scene_id]
     if any(word in user_text for word in ["骗子", "报警", "不信", "挂了", "核实"]):
         return "您的警惕性很强。训练到这里可以停一下：遇到可疑要求，先挂断并通过官方渠道核实。"
+    material_reply = choose_material_reply(scene_id, user_text)
+    if material_reply:
+        return material_reply
     if scene_id == "SC-01":
         return "我是办案人员，现在情况比较紧急。为了核实账户安全，请您先不要告诉家里人，按我说的步骤配合登记。"
     if scene_id == "SC-06":
@@ -310,6 +366,18 @@ def start_training(scene_label: str, difficulty: str) -> Tuple[Dict[str, Any], L
     return state, chat, _risk_markdown(0), "尚未开始评分。", _advice_markdown(state), "训练已开始。", None, _progress_html(state), _scene_header_html(state)
 
 
+def start_training_from_ui(
+    common_scene_label: str | None,
+    more_scene_label: str | None,
+    difficulty: str,
+) -> Tuple[Dict[str, Any], List[List[str | None]], str, str, str, str, None, str, str]:
+    return start_training(_resolve_scene_label(common_scene_label, more_scene_label), difficulty)
+
+
+def reset_more_scene(_common_scene_label: str | None) -> str:
+    return MORE_SCENE_PLACEHOLDER
+
+
 def send_message(
     user_text: str,
     chat_history: List[List[str | None]],
@@ -404,26 +472,51 @@ def _extract_failure_points(history: List[Dict[str, str]]) -> List[str]:
     return points[:5]
 
 
-def transcribe_audio(audio_path: str | None) -> Tuple[str, str]:
+def _audio_path_from_value(audio_value: Any) -> str | None:
+    """Normalize Gradio audio values across versions to a filepath."""
+    if not audio_value:
+        return None
+    if isinstance(audio_value, str):
+        return audio_value
+    if isinstance(audio_value, dict):
+        for key in ("path", "name", "orig_name"):
+            value = audio_value.get(key)
+            if value:
+                return str(value)
+        return None
+    if isinstance(audio_value, (list, tuple)) and audio_value:
+        return _audio_path_from_value(audio_value[0])
+    return str(audio_value)
+
+
+def transcribe_audio(audio_value: Any) -> Tuple[str, str]:
+    audio_path = _audio_path_from_value(audio_value)
     if not audio_path:
         return "", "请先录音或上传音频。"
+    if not os.path.exists(audio_path):
+        return "", "没有找到录音文件，请重新录制后再试。"
     try:
         text = _get_asr(WHISPER_MODEL).transcribe(audio_path)
+        text = (text or "").strip()
+        if not text:
+            return "", "没有识别到有效语音，请靠近麦克风重新说一遍。"
         return text, "语音识别完成，可以修改后发送。"
     except Exception as exc:
         return "", f"语音识别暂不可用：{exc}"
 
 
+
 def send_text_or_audio(
     user_text: str,
-    audio_path: str | None,
+    audio_path: Any,
     chat_history: List[List[str | None]],
     state: Dict[str, Any],
 ) -> Generator[Tuple[List[List[str | None]], str, str, str, str, None, str, Dict[str, Any], str, str], None, None]:
     text = (user_text or "").strip()
-    if not text and audio_path:
+    audio_file = _audio_path_from_value(audio_path)
+    if not text and audio_file:
         yield chat_history or [], "", _risk_markdown(state["tracker"].get_composite_score() if state and state.get("tracker") else 0), _top_dimensions_markdown(state), _advice_markdown(state), None, "正在识别语音，请稍候。", state, _progress_html(state), _scene_header_html(state)
-        text, status = transcribe_audio(audio_path)
+        text, status = transcribe_audio(audio_file)
         if not text:
             yield chat_history or [], "", _risk_markdown(state["tracker"].get_composite_score() if state and state.get("tracker") else 0), _top_dimensions_markdown(state), _advice_markdown(state), None, status, state, _progress_html(state), _scene_header_html(state)
             return
@@ -450,89 +543,103 @@ def show_safety_tip() -> str:
 
 
 def show_help_tip() -> str:
-    return "求助建议：请立即联系家人、社区工作人员或拨打 110；不要继续和可疑来电保持单独通话。"
+    return "向子女求助：请暂停训练，联系身边家人、同学或指导老师一起复盘这段对话；如果只是演示训练，不需要拨打报警电话。"
 
 
 def build_app() -> gr.Blocks:
     with gr.Blocks(css=_load_css(), title="老年人电信诈骗沉浸式心理免疫训练系统") as demo:
         app_state = gr.State(_new_empty_state())
 
-        with gr.Row(elem_classes=["topbar"]):
+        with gr.Row(elem_classes=["app-header"]):
             gr.HTML(
-                "<div class='brand'>"
-                "<div class='brand-mark'>人</div>"
-                "<div class='brand-copy'>"
-                "<strong>老年用户防诈训练系统</strong>"
-                "<span>沉浸式心理免疫训练</span>"
+                "<div class='brand-panel'>"
+                "<div class='brand-icon'>防</div>"
+                "<div class='brand-text'>"
+                "<strong>银龄反诈沉浸式心理免疫训练舱</strong>"
+                "<span>沉浸对话 · 心理风险识别 · 训练报告</span>"
                 "</div>"
                 "</div>"
             )
             progress_bar = gr.HTML(_progress_html(_new_empty_state()))
             gr.HTML(
-                "<div class='top-actions'>"
+                "<div class='header-tools'>"
                 "<span>首页</span><span>帮助</span><span>设置</span>"
                 "</div>"
             )
 
-        with gr.Row(elem_classes=["main-layout"]):
-            with gr.Column(scale=1, min_width=250, elem_classes=["scene-panel"]):
-                gr.Markdown("### 场景选择")
+        with gr.Row(elem_classes=["workspace-layout"]):
+            with gr.Column(scale=1, min_width=280, elem_classes=["scene-rail"]):
+                gr.HTML(
+                    "<div class='rail-title'>"
+                    "<strong>选择训练场景</strong>"
+                    "<span>滚动列表，选择一种常见骗局</span>"
+                    "</div>"
+                )
                 scene_dropdown = gr.Radio(
                     choices=_scene_choices(),
                     value=_scene_choices()[0],
                     label=None,
                     elem_classes=["scene-list"],
                 )
-                difficulty = gr.Radio(["低", "中", "高"], value="中", label="训练强度")
+                difficulty = gr.Radio(
+                    ["低", "中", "高"],
+                    value="中",
+                    label="训练强度",
+                    elem_classes=["difficulty-radio"],
+                )
                 start_btn = gr.Button("开始训练", variant="primary", elem_classes=["start-btn"])
-                finish_btn = gr.Button("结束训练并生成报告", elem_classes=["finish-btn"])
-                gr.Markdown("### 快捷操作")
-                replay_btn = gr.Button("重听上一条", elem_classes=["assist-btn"])
-                safe_tip_btn = gr.Button("查看防诈提示", elem_classes=["assist-btn"])
-                help_btn = gr.Button("求助家人 / 客服", elem_classes=["assist-btn"])
+                favorite_btn = gr.Button("收藏当前场景", elem_classes=["favorite-btn"])
                 status = gr.Markdown("请选择场景后开始训练。", elem_classes=["status-box"])
 
-            with gr.Column(scale=3, min_width=560, elem_classes=["dialogue-panel"]):
+            with gr.Column(scale=4, min_width=560, elem_classes=["training-area"]):
                 scene_header = gr.HTML(_scene_header_html(_new_empty_state()))
-                chatbot = gr.Chatbot(label="对话训练", height=500, elem_classes=["training-chat"])
-                with gr.Group(elem_classes=["input-dock"]):
-                    with gr.Row(elem_classes=["input-row"]):
-                        text_input = gr.Textbox(
-                            label="文字输入",
-                            placeholder="请输入您的回复，也可以录音后直接发送",
-                            lines=2,
-                            scale=5,
-                        )
-                        send_btn = gr.Button("发送", variant="primary", scale=1, elem_classes=["send-btn"])
-                    audio_input = gr.Audio(
-                        sources=["microphone", "upload"],
-                        type="filepath",
-                        label="语音输入",
-                        elem_classes=["audio-input"],
-                    )
-                    transcribe_btn = gr.Button("识别语音到输入框", elem_classes=["transcribe-btn"])
+                chatbot = gr.Chatbot(
+                    label=None,
+                    show_label=False,
+                    height=430,
+                    elem_classes=["training-chat"],
+                )
                 gr.HTML(
                     "<div class='safe-tip'>"
-                    "<strong>提示：</strong>公检法、银行和客服不会要求转账、提供验证码或屏幕共享。"
+                    "<strong>本轮提醒</strong>"
+                    "<span>公检法、银行和客服不会要求转账、提供验证码或共享屏幕。</span>"
                     "</div>"
                 )
+                with gr.Group(elem_classes=["composer"]):
+                    with gr.Row(elem_classes=["composer-row"]):
+                        with gr.Column(scale=1, min_width=160, elem_classes=["voice-box"]):
+                            gr.HTML("<div class='voice-heading'><strong>语音输入</strong><span>点击录音或上传</span></div>")
+                            audio_input = gr.Audio(
+                                sources=["microphone", "upload"],
+                                type="filepath",
+                                label=None,
+                                show_label=False,
+                                elem_classes=["voice-input"],
+                            )
+                            transcribe_btn = gr.Button("语音转文字", elem_classes=["transcribe-btn"])
+                        text_input = gr.Textbox(
+                            label=None,
+                            placeholder="请输入您的回复，也可以先录音再转成文字...",
+                            lines=2,
+                            scale=5,
+                            elem_classes=["reply-box"],
+                        )
+                        send_btn = gr.Button("发送", variant="primary", scale=1, elem_classes=["send-btn"])
+                with gr.Row(elem_classes=["quick-actions"]):
+                    replay_btn = gr.Button("重听上一条", elem_classes=["assist-action"])
+                    safe_tip_btn = gr.Button("防诈提示", elem_classes=["assist-action"])
+                    help_btn = gr.Button("向子女求助", elem_classes=["assist-action"])
+                    finish_btn = gr.Button("挂断/退出", elem_classes=["assist-action", "finish-action"])
 
-            with gr.Column(scale=1, min_width=310, elem_classes=["risk-panel"]):
+            with gr.Column(scale=1, min_width=320, elem_classes=["insight-rail"]):
                 risk_level = gr.HTML(_risk_markdown(0))
-                with gr.Group(elem_classes=["analysis-card"]):
-                    gr.Markdown("### 主要触发因素")
-                    top_dimensions = gr.Markdown("尚未开始评分。")
-                with gr.Group(elem_classes=["analysis-card advice-card"]):
-                    gr.Markdown("### 应对建议")
-                    advice = gr.Markdown("选择场景并开始训练后，这里会显示即时建议。")
-                report_file = gr.File(label="PDF 报告", elem_classes=["report-file"])
-
-        with gr.Row(elem_classes=["bottom-assist"]):
-            gr.HTML("<span>辅助功能</span>")
-            gr.HTML("<span>大按钮操作</span>")
-            gr.HTML("<span>语音与文字双输入</span>")
-            with gr.Row(elem_classes=["bottom-actions"]):
-                clear_btn = gr.Button("清空输入")
+                with gr.Group(elem_classes=["insight-card", "factor-card"]):
+                    gr.HTML("<div class='card-title'>主要触发因素</div>")
+                    top_dimensions = gr.HTML(_top_dimensions_markdown(_new_empty_state()))
+                with gr.Group(elem_classes=["insight-card", "advice-card"]):
+                    gr.HTML("<div class='card-title'>即时应对建议</div>")
+                    advice = gr.HTML(_advice_markdown(_new_empty_state()))
+                report_file = gr.File(label="PDF 训练报告", elem_classes=["report-file"])
 
         start_btn.click(
             start_training,
@@ -555,10 +662,11 @@ def build_app() -> gr.Blocks:
             outputs=[chatbot, risk_level, top_dimensions, advice, report_file, status, app_state, progress_bar, scene_header],
         )
         transcribe_btn.click(transcribe_audio, inputs=[audio_input], outputs=[text_input, status])
-        clear_btn.click(lambda: "", outputs=[text_input])
+        audio_input.change(transcribe_audio, inputs=[audio_input], outputs=[text_input, status])
         replay_btn.click(replay_last_ai, inputs=[app_state], outputs=[status])
         safe_tip_btn.click(show_safety_tip, outputs=[status])
         help_btn.click(show_help_tip, outputs=[status])
+        favorite_btn.click(lambda: "已收藏当前入口：后续可以把常用场景固定到列表顶部。", outputs=[status])
 
     return demo
 

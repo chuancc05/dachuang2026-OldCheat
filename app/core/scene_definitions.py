@@ -3,6 +3,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List
+from app.core.material_library import augment_scene_definition
 
 logger = logging.getLogger(__name__)
 
@@ -104,4 +105,14 @@ def _load_external_scenes() -> Dict[str, SceneDefinition]:
     return scenes
 
 
-SCENES: Dict[str, SceneDefinition] = {**DEFAULT_SCENES, **_load_external_scenes()}
+
+def _augment_with_system_materials(scenes: Dict[str, SceneDefinition]) -> Dict[str, SceneDefinition]:
+    for scene in scenes.values():
+        try:
+            augment_scene_definition(scene)
+        except Exception as exc:
+            logger.warning("加载TeleAntiFraud素材失败: %s", exc)
+    return scenes
+
+
+SCENES: Dict[str, SceneDefinition] = _augment_with_system_materials({**DEFAULT_SCENES, **_load_external_scenes()})

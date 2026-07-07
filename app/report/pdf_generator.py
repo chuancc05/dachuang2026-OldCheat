@@ -160,15 +160,15 @@ class PDFReportGenerator:
         story.append(Paragraph(self._safe_text(summary or "本次训练已完成，系统根据对话过程生成以下评估结果。"), self.body_style))
 
         story.append(Paragraph("2. 心理风险评分", self.heading_style))
-        story.append(Paragraph("下表展示本次对话中被触发的心理风险维度。分数越高，代表该维度越需要重点关注。", self.body_style))
+        story.append(Paragraph("下表展示本次对话中被触发的心理风险维度。分数越高，代表该维度越需要重点关注；下方图表会按强弱排序显示最主要的触发因素。", self.body_style))
         story.append(self._build_score_table(dimension_scores))
         story.append(Spacer(1, 12))
 
         if os.path.exists(radar_chart_path):
-            img = Image(radar_chart_path, width=400, height=400)
+            img = Image(radar_chart_path, width=450, height=280)
             story.append(img)
         else:
-            story.append(Paragraph("<i>[未找到雷达图文件]</i>", self.body_style))
+            story.append(Paragraph("<i>[未找到触发因素图表文件]</i>", self.body_style))
             logger.warning(f"雷达图未找到: {radar_chart_path}")
 
         story.append(PageBreak())

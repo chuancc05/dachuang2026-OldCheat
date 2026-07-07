@@ -6,8 +6,33 @@ import os
 import re
 import whisper
 import logging
+import shutil
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_ffmpeg_available() -> None:
+    """Expose a local ffmpeg.exe to Whisper when system ffmpeg is absent."""
+    if shutil.which("ffmpeg"):
+        return
+    try:
+        import imageio_ffmpeg
+
+        bundled = Path(imageio_ffmpeg.get_ffmpeg_exe())
+        local_dir = Path(__file__).resolve().parents[2] / "data" / "bin"
+        local_dir.mkdir(parents=True, exist_ok=True)
+        local_ffmpeg = local_dir / "ffmpeg.exe"
+        if bundled.exists() and not local_ffmpeg.exists():
+            shutil.copy2(bundled, local_ffmpeg)
+        if local_ffmpeg.exists():
+            ffmpeg_dir = str(local_ffmpeg.parent)
+            path_parts = os.environ.get("PATH", "").split(os.pathsep)
+            if ffmpeg_dir not in path_parts:
+                os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+            logger.info("Using local ffmpeg: %s", local_ffmpeg)
+    except Exception as exc:
+        logger.warning("Unable to configure local ffmpeg: %s", exc)
 
 class WhisperASR:
     """
@@ -21,6 +46,7 @@ class WhisperASR:
         :param download_root: 模型下载存放路径
         """
         self.model_name = model_name
+        _ensure_ffmpeg_available()
         logger.info(f"正在加载Whisper模型: {self.model_name}...")
         try:
             self.model = whisper.load_model(self.model_name, download_root=download_root)
@@ -42,7 +68,7 @@ class WhisperASR:
 
         try:
             # 执行识别
-            result = self.model.transcribe(audio_file_path)
+            result = self.model.transcribe(audio_file_path, language="zh", task="transcribe", fp16=False)
             text = result.get("text", "").strip()
             
             # 基础语义过滤：如果文本长度过短或者是特殊字符，返回空字符串
@@ -79,3 +105,5 @@ class WhisperASR:
             return True
             
         return False
+
+
