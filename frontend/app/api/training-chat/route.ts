@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import type { Message } from "@/components/training/simulation-stage"
 import type { Scenario, ScriptTurn } from "@/lib/scenarios"
+import { formatRagReferences, retrieveRagContext, type RagContext } from "@/lib/rag"
 
 interface ChatRequest {
   scenario: Scenario
@@ -80,11 +81,15 @@ function sanitizeAiText(value: string): string {
     .slice(0, 180)
 }
 
-function buildSystemPrompt(scenario: Scenario): string {
+function buildSystemPrompt(scenario: Scenario, ragContext?: RagContext): string {
   const examples = scenario.script
     .slice(0, 8)
     .map((turn, index) => `${index + 1}. ${turn.line}`)
     .join("\n")
+
+  const ragReferences = ragContext?.references?.length
+    ? formatRagReferences(ragContext.references)
+    : "No retrieved examples."
 
   return [
     "You generate safe simulated scammer dialogue for an anti-fraud training app for older adults.",
@@ -96,6 +101,8 @@ function buildSystemPrompt(scenario: Scenario): string {
     `Core tactics: ${scenario.method}`,
     "Reference lines from the scenario library. Use their tone, pacing, and risk cues, but do not copy them mechanically:",
     examples || "No reference lines.",
+    "Retrieved TeleAntiFraud-style references from the local RAG layer. Prefer these when they match the current scene and user reply:",
+    ragReferences,
     "Reply rules:",
     "1. Output only the next sentence or short paragraph from the simulated persona. No explanations, no role labels.",
     "2. Keep it natural, oral, and scenario-specific. 40-90 Chinese characters is ideal.",
@@ -104,10 +111,11 @@ function buildSystemPrompt(scenario: Scenario): string {
     "5. Never request real bank cards, ID numbers, passwords, real verification codes, home addresses, or other sensitive data.",
     "6. If the plot needs payment, links, accounts, or codes, use clearly fictional placeholders such as mock account, mock app, mock link, or mock code.",
     "7. Do not provide real executable fraud instructions, real links, real accounts, or real contact information.",
+    "8. Treat retrieved references as style and risk-pattern examples only. Do not copy full sample text verbatim.",
   ].join("\n")
 }
 
-function buildMessages(scenario: Scenario, messages: Message[], userText: string) {
+function buildMessages(scenario: Scenario, messages: Message[], userText: string, ragContext?: RagContext) {
   const recent = messages
     .filter((message) => message.sender !== "system")
     .slice(-10)
@@ -117,7 +125,7 @@ function buildMessages(scenario: Scenario, messages: Message[], userText: string
     }))
 
   return [
-    { role: "system", content: buildSystemPrompt(scenario) },
+    { role: "system", content: buildSystemPrompt(scenario, ragContext) },
     ...recent,
     { role: "user", content: userText },
   ]
@@ -133,7 +141,12 @@ async function withTimeout<T>(ms: number, task: (signal: AbortSignal) => Promise
   }
 }
 
-async function askDeepSeek(scenario: Scenario, messages: Message[], userText: string): Promise<string> {
+async function askDeepSeek(
+  scenario: Scenario,
+  messages: Message[],
+  userText: string,
+  ragContext?: RagContext,
+): Promise<string> {
   if (!DEEPSEEK_API_KEY) throw new Error("DeepSeek API key is not configured")
 
   return withTimeout(45_000, async (signal) => {
@@ -145,7 +158,7 @@ async function askDeepSeek(scenario: Scenario, messages: Message[], userText: st
       },
       body: JSON.stringify({
         model: DEEPSEEK_MODEL_DIALOG,
-        messages: buildMessages(scenario, messages, userText),
+        messages: buildMessages(scenario, messages, userText, ragContext),
         stream: false,
         temperature: 1.1,
         max_tokens: 220,
@@ -162,7 +175,12 @@ async function askDeepSeek(scenario: Scenario, messages: Message[], userText: st
   })
 }
 
-async function askOllama(scenario: Scenario, messages: Message[], userText: string): Promise<string> {
+async function askOllama(
+  scenario: Scenario,
+  messages: Message[],
+  userText: string,
+  ragContext?: RagContext,
+): Promise<string> {
   return withTimeout(45_000, async (signal) => {
     const response = await fetch(`${OLLAMA_URL.replace(/\/$/, "")}/api/chat`, {
       method: "POST",
@@ -170,7 +188,7 @@ async function askOllama(scenario: Scenario, messages: Message[], userText: stri
       body: JSON.stringify({
         model: OLLAMA_MODEL,
         stream: false,
-        messages: buildMessages(scenario, messages, userText),
+        messages: buildMessages(scenario, messages, userText, ragContext),
         options: {
           temperature: 0.78,
           top_p: 0.9,
@@ -199,6 +217,7 @@ async function generateAiLine(
   scenario: Scenario,
   messages: Message[],
   userText: string,
+  ragContext?: RagContext,
 ): Promise<{ line: string; source: Exclude<AiSource, "fallback">; errors: string[] }> {
   const errors: string[] = []
 
@@ -206,8 +225,8 @@ async function generateAiLine(
     try {
       const line =
         provider === "deepseek"
-          ? await askDeepSeek(scenario, messages, userText)
-          : await askOllama(scenario, messages, userText)
+          ? await askDeepSeek(scenario, messages, userText, ragContext)
+          : await askOllama(scenario, messages, userText, ragContext)
       return { line, source: provider, errors }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -230,9 +249,10 @@ export async function POST(request: NextRequest) {
   if (!scenario || !userText.trim()) {
     return NextResponse.json({ error: "Missing scenario or userText" }, { status: 400 })
   }
+  const ragContext = await retrieveRagContext(scenario, messages, userText.trim())
 
   try {
-    const result = await generateAiLine(scenario, messages, userText.trim())
+    const result = await generateAiLine(scenario, messages, userText.trim(), ragContext)
     const trigger = pickTrigger(scenario, result.line, turnIndex)
     return NextResponse.json({
       line: result.line,
@@ -240,13 +260,28 @@ export async function POST(request: NextRequest) {
       riskDelta: Math.min(4.5, 1.8 + turnIndex * 0.35),
       coach: buildCoach(trigger),
       source: result.source,
+      rag: {
+        enabled: ragContext.enabled,
+        mode: ragContext.mode,
+        count: ragContext.references.length,
+        ids: ragContext.references.map((ref) => ref.id),
+        error: ragContext.error,
+      },
     })
   } catch (error) {
     const fallback = fallbackTurn(scenario, turnIndex)
     return NextResponse.json({
       ...fallback,
       source: "fallback" satisfies AiSource,
+      rag: {
+        enabled: ragContext.enabled,
+        mode: ragContext.mode,
+        count: ragContext.references.length,
+        ids: ragContext.references.map((ref) => ref.id),
+        error: ragContext.error,
+      },
       error: error instanceof Error ? error.message : "Unknown AI provider error",
     })
   }
 }
+
