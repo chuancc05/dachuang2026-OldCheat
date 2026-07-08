@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { Button } from "@/components/ui/button"
 import type { Scenario } from "@/lib/scenarios"
 import { cn } from "@/lib/utils"
@@ -13,6 +13,7 @@ import {
   CheckCircle2,
   ListChecks,
   MessageSquareText,
+  Sparkles,
 } from "lucide-react"
 
 export type ReportEvaluation = "safe" | "risky" | "mixed" | "neutral"
@@ -26,6 +27,14 @@ export interface ReportEvent {
   evaluation: ReportEvaluation
   reason: string
   aiSource: "deepseek" | "ollama" | "fallback" | "idle"
+}
+
+interface AiReport {
+  summary: string
+  improvements: string[]
+  elderAdvice: string
+  nextTraining: string
+  source: "deepseek" | "fallback"
 }
 
 interface ReportDialogProps {
@@ -60,6 +69,10 @@ export function ReportDialog({
   turns,
   events,
 }: ReportDialogProps) {
+  const [aiReport, setAiReport] = useState<AiReport | null>(null)
+  const [aiLoading, setAiLoading] = useState(false)
+  const [aiError, setAiError] = useState<string | null>(null)
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") onClose()
@@ -67,6 +80,71 @@ export function ReportDialog({
     if (open) document.addEventListener("keydown", onKey)
     return () => document.removeEventListener("keydown", onKey)
   }, [open, onClose])
+
+  const requestKey = useMemo(() => {
+    if (!scenario || !open || events.length === 0) return ""
+    return JSON.stringify({ scenario: scenario.code, turns, defenseScore, goodMoves, riskyMoves, peakRisk, events })
+  }, [defenseScore, events, goodMoves, open, peakRisk, riskyMoves, scenario, turns])
+
+  useEffect(() => {
+    if (!open || !scenario || events.length === 0) {
+      setAiReport(null)
+      setAiLoading(false)
+      setAiError(null)
+      return
+    }
+
+    let cancelled = false
+    setAiLoading(true)
+    setAiError(null)
+
+    fetch("/api/training-report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scenario: {
+          code: scenario.code,
+          title: scenario.title,
+          difficulty: scenario.difficulty,
+          channel: scenario.channel,
+          tagline: scenario.tagline,
+          method: scenario.method,
+        },
+        metrics: {
+          defenseScore,
+          goodMoves,
+          riskyMoves,
+          peakRisk,
+          turns,
+          triggers,
+        },
+        events,
+      }),
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          const data = await response.json().catch(() => null)
+          throw new Error(data?.error ?? `AI report returned ${response.status}`)
+        }
+        return response.json() as Promise<AiReport>
+      })
+      .then((data) => {
+        if (!cancelled) setAiReport(data)
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setAiReport(null)
+          setAiError(error instanceof Error ? error.message : "AI 总结生成失败")
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAiLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [requestKey, open, scenario, events, defenseScore, goodMoves, riskyMoves, peakRisk, turns, triggers])
 
   if (!open || !scenario) return null
 
@@ -95,7 +173,7 @@ export function ReportDialog({
           <div>
             <p className="font-mono text-xs text-muted-foreground">训练报告 · {scenario.code}</p>
             <h2 className="text-2xl font-bold leading-tight">{scenario.title} · 训练复盘</h2>
-            <p className="mt-1 text-sm text-muted-foreground">基于本场对话、风险动作和心理弱点触发记录生成。</p>
+            <p className="mt-1 text-sm text-muted-foreground">规则指标负责评分，DeepSeek 负责生成自然语言总结。</p>
           </div>
           <button
             onClick={onClose}
@@ -130,6 +208,9 @@ export function ReportDialog({
             <Metric icon={<TriangleAlert className="size-4" />} label="峰值风险" value={peakRisk.toFixed(1)} tone="warning" />
           </div>
         </div>
+
+        <SectionTitle icon={<Sparkles className="size-4" />} title="DeepSeek 复盘总结" />
+        <AiReportCard report={aiReport} loading={aiLoading} error={aiError} hasEvents={events.length > 0} />
 
         <SectionTitle icon={<ListChecks className="size-4" />} title="评分解释" />
         <div className="grid gap-2 sm:grid-cols-2">
@@ -183,6 +264,50 @@ export function ReportDialog({
             完成
           </Button>
         </div>
+      </div>
+    </div>
+  )
+}
+
+function AiReportCard({
+  report,
+  loading,
+  error,
+  hasEvents,
+}: {
+  report: AiReport | null
+  loading: boolean
+  error: string | null
+  hasEvents: boolean
+}) {
+  if (!hasEvents) {
+    return <p className="rounded-xl border bg-muted/30 p-3 text-sm text-muted-foreground">完成至少一轮用户回复后生成 AI 总结。</p>
+  }
+  if (loading) {
+    return <p className="rounded-xl border bg-primary/5 p-3 text-sm text-primary">DeepSeek 正在生成本场总结...</p>
+  }
+  if (error) {
+    return <p className="rounded-xl border bg-muted/30 p-3 text-sm text-muted-foreground">AI 总结暂不可用：{error}。下方规则报告仍可正常使用。</p>
+  }
+  if (!report) return null
+
+  return (
+    <div className="rounded-2xl border border-primary/30 bg-primary/5 p-4">
+      <p className="text-sm leading-relaxed text-foreground/90">{report.summary}</p>
+      <div className="mt-3 grid gap-3 md:grid-cols-2">
+        <div>
+          <div className="mb-1 text-xs font-semibold text-muted-foreground">需要改进</div>
+          <ul className="space-y-1 text-sm text-foreground/90">
+            {report.improvements.map((item) => <li key={item}>· {item}</li>)}
+          </ul>
+        </div>
+        <div>
+          <div className="mb-1 text-xs font-semibold text-muted-foreground">下一次训练</div>
+          <p className="text-sm text-foreground/90">{report.nextTraining}</p>
+        </div>
+      </div>
+      <div className="mt-3 rounded-xl bg-card/70 p-3 text-sm leading-relaxed text-foreground/90">
+        {report.elderAdvice}
       </div>
     </div>
   )
