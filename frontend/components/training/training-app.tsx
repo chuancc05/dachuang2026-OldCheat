@@ -5,18 +5,63 @@ import { ScenarioRail } from "@/components/training/scenario-rail"
 import { SimulationStage, type Message } from "@/components/training/simulation-stage"
 import { CoachPanel } from "@/components/training/coach-panel"
 import { ReplyBar } from "@/components/training/reply-bar"
-import { ReportDialog } from "@/components/training/report-dialog"
+import { ReportDialog, type ReportEvent, type ReportEvaluation } from "@/components/training/report-dialog"
 import { Button } from "@/components/ui/button"
 import { evaluateReply, type Scenario } from "@/lib/scenarios"
 import { ShieldHalf, Play, RotateCcw, HelpCircle } from "lucide-react"
 
-const DEFAULT_ADVICE = "保持“核实身份、拒绝验证码、拒绝转账”的习惯。遇到催促和恐吓，先停下、再核实。"
+const DEFAULT_ADVICE = "保持核实身份、拒绝验证码、拒绝转账的习惯。遇到催促和恐吓，先停下，再核实。"
 
 const QUICK_REPLIES = [
   "这听起来像诈骗，我要挂断了",
   "我要先联系我的子女核实",
   "我不会转账，也不会给验证码",
 ]
+
+type AiSource = "idle" | "deepseek" | "ollama" | "fallback"
+
+const AI_SOURCE_LABELS: Record<AiSource, string> = {
+  idle: "当前模型：待启动",
+  deepseek: "当前模型：DeepSeek API",
+  ollama: "当前模型：本地 Ollama",
+  fallback: "当前模型：场景库兜底",
+}
+
+function parseAiSource(value: unknown): AiSource {
+  return value === "deepseek" || value === "ollama" || value === "fallback" ? value : "fallback"
+}
+
+function summarizeUserMove(hitDefensive: boolean, hitRisky: boolean): { evaluation: ReportEvaluation; reason: string } {
+  if (hitDefensive && hitRisky) {
+    return {
+      evaluation: "mixed",
+      reason: "用户回复中同时出现了防御动作和风险意图。建议把回复进一步收敛为核实身份、拒绝转账或直接挂断。",
+    }
+  }
+  if (hitDefensive) {
+    return {
+      evaluation: "safe",
+      reason: "用户表现出防御意识，例如核实身份、拒绝转账、拒绝验证码或寻求家人/官方渠道确认。",
+    }
+  }
+  if (hitRisky) {
+    return {
+      evaluation: "risky",
+      reason: "用户回复中出现转账、提供信息、继续操作或相信对方的风险倾向，需要立即停下并核实。",
+    }
+  }
+  return {
+    evaluation: "neutral",
+    reason: "用户回复暂未触发明显风险或防御关键词，建议继续观察对方是否引导转账、验证码或隔离核实。",
+  }
+}
+
+function lastScammerText(messages: Message[], scenario: Scenario, turnIndex: number): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.sender === "scammer") return messages[index].text
+  }
+  return scenario.script[Math.max(0, turnIndex - 1)]?.line ?? "本轮开始前暂无诈骗话术记录。"
+}
 
 let idc = 0
 const nextId = () => `m-${idc++}`
@@ -38,14 +83,15 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
   const [duration, setDuration] = useState(0)
   const [reportOpen, setReportOpen] = useState(false)
   const [coreCompleteNotified, setCoreCompleteNotified] = useState(false)
+  const [lastAiSource, setLastAiSource] = useState<AiSource>("idle")
+  const [reportEvents, setReportEvents] = useState<ReportEvent[]>([])
 
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // session timer
   useEffect(() => {
     if (!started || finished) return
-    const t = setInterval(() => setDuration((d) => d + 1), 1000)
-    return () => clearInterval(t)
+    const timer = setInterval(() => setDuration((value) => value + 1), 1000)
+    return () => clearInterval(timer)
   }, [started, finished])
 
   useEffect(
@@ -56,16 +102,16 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
   )
 
   const bumpRisk = useCallback((delta: number) => {
-    setRisk((r) => {
-      const next = Math.max(0, Math.min(10, r + delta))
-      setPeakRisk((p) => Math.max(p, next))
+    setRisk((current) => {
+      const next = Math.max(0, Math.min(10, current + delta))
+      setPeakRisk((peak) => Math.max(peak, next))
       return next
     })
   }, [])
 
-  const resetSession = useCallback((s: Scenario | null) => {
+  const resetSession = useCallback((nextScenario: Scenario | null) => {
     if (timeoutRef.current) clearTimeout(timeoutRef.current)
-    setScenario(s)
+    setScenario(nextScenario)
     setStarted(false)
     setFinished(false)
     setMessages([])
@@ -78,32 +124,37 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     setGoodMoves(0)
     setRiskyMoves(0)
     setDuration(0)
+    setReportOpen(false)
     setCoreCompleteNotified(false)
+    setLastAiSource("idle")
+    setReportEvents([])
   }, [])
 
   const revealScammerLine = useCallback(
-    (index: number, s: Scenario) => {
-      const turn = s.script[index]
+    (index: number, activeScenario: Scenario) => {
+      const turn = activeScenario.script[index]
       if (!turn) return
+
       setTyping(true)
       timeoutRef.current = setTimeout(() => {
         setTyping(false)
-        setMessages((m) => [
-          ...m,
+        setMessages((items) => [
+          ...items,
           { id: nextId(), sender: "scammer", text: turn.line, trigger: turn.trigger },
         ])
         setScammerShown(index + 1)
         bumpRisk(turn.riskDelta)
         setAdvice(turn.coach)
-        if (turn.trigger) setTriggers((t) => [...t, turn.trigger as string])
+        setLastAiSource("fallback")
+        if (turn.trigger) setTriggers((items) => [...items, turn.trigger as string])
       }, 900)
     },
     [bumpRisk],
   )
 
   const handleSelect = useCallback(
-    (s: Scenario) => {
-      resetSession(s)
+    (nextScenario: Scenario) => {
+      resetSession(nextScenario)
     },
     [resetSession],
   )
@@ -113,13 +164,13 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     setStarted(true)
     revealScammerLine(0, scenario)
   }, [scenario, revealScammerLine])
+
   const defenseScore = Math.round(
     Math.max(0, Math.min(100, 100 - peakRisk * 6 - riskyMoves * 12 + goodMoves * 6)),
   )
   const totalTurns = scenario ? scenario.script.length : 0
   const progress = totalTurns ? Math.min(scammerShown, totalTurns) : 0
   const inputDisabled = !started || finished || typing
-
 
   const handleSend = useCallback(
     async (text: string) => {
@@ -128,12 +179,14 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
       const userMessage: Message = { id: nextId(), sender: "user", text }
       const history = messages
       const turnIndex = scammerShown
-      setMessages((m) => [...m, userMessage])
+      const scammerText = lastScammerText(history, scenario, turnIndex)
+      setMessages((items) => [...items, userMessage])
 
       const { delta, hitDefensive, hitRisky } = evaluateReply(text)
+      const userMove = summarizeUserMove(hitDefensive, hitRisky)
       if (delta !== 0) bumpRisk(delta)
-      if (hitDefensive) setGoodMoves((g) => g + 1)
-      if (hitRisky) setRiskyMoves((r) => r + 1)
+      if (hitDefensive) setGoodMoves((value) => value + 1)
+      if (hitRisky) setRiskyMoves((value) => value + 1)
 
       setTyping(true)
       try {
@@ -150,35 +203,56 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
 
         if (!response.ok) throw new Error(`AI route returned ${response.status}`)
         const turn = await response.json()
+        const source = parseAiSource(turn.source)
         const trigger = typeof turn.trigger === "string" ? turn.trigger : undefined
         const riskDelta = typeof turn.riskDelta === "number" ? turn.riskDelta : 2
         const coach = typeof turn.coach === "string" ? turn.coach : DEFAULT_ADVICE
+        const fallbackLine = scenario.script[turnIndex % Math.max(scenario.script.length, 1)]?.line
         const line = typeof turn.line === "string" && turn.line.trim()
           ? turn.line.trim()
-          : scenario.script[turnIndex % Math.max(scenario.script.length, 1)]?.line ?? "我这边再给您说明一下情况，您先别急着挂断。"
+          : fallbackLine ?? "我这边再给您说明一下情况，您先别急着挂断。"
 
-        setMessages((m) => [
-          ...m,
+        setLastAiSource(source)
+        setMessages((items) => [
+          ...items,
           { id: nextId(), sender: "scammer", text: line, trigger },
+        ])
+        setReportEvents((items) => [
+          ...items,
+          {
+            turn: turnIndex,
+            scammerText,
+            userText: text,
+            trigger,
+            riskDelta,
+            evaluation: userMove.evaluation,
+            reason: userMove.reason,
+            aiSource: source,
+          },
         ])
         setScammerShown((count) => count + 1)
         bumpRisk(riskDelta)
         setAdvice(coach)
-        if (trigger) setTriggers((t) => [...t, trigger])
+        if (trigger) setTriggers((items) => [...items, trigger])
 
-        if (turnIndex + 1 >= totalTurns && !coreCompleteNotified) {
+        if (totalTurns > 0 && turnIndex + 1 >= totalTurns && !coreCompleteNotified) {
           setCoreCompleteNotified(true)
-          setMessages((m) => [
-            ...m,
-            { id: nextId(), sender: "system", text: "已达到建议训练轮次。你可以查看报告，也可以继续对话练习更复杂的应对。" },
+          setMessages((items) => [
+            ...items,
+            {
+              id: nextId(),
+              sender: "system",
+              text: "已达到建议训练轮次。你可以查看报告，也可以继续对话，练习更复杂的应对。",
+            },
           ])
           setAdvice("建议轮次已完成，但训练不会自动中断。你可以继续练习，或查看报告复盘高风险话术与有效应对。")
         }
       } catch (error) {
         const fallback = scenario.script[turnIndex % Math.max(scenario.script.length, 1)]
         const trigger = fallback?.trigger
-        setMessages((m) => [
-          ...m,
+        setLastAiSource("fallback")
+        setMessages((items) => [
+          ...items,
           {
             id: nextId(),
             sender: "scammer",
@@ -187,10 +261,23 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
           },
           { id: nextId(), sender: "system", text: "AI 暂时未响应，本轮已使用场景库话术兜底。" },
         ])
+        setReportEvents((items) => [
+          ...items,
+          {
+            turn: turnIndex,
+            scammerText,
+            userText: text,
+            trigger,
+            riskDelta: fallback?.riskDelta ?? 2,
+            evaluation: userMove.evaluation,
+            reason: userMove.reason,
+            aiSource: "fallback",
+          },
+        ])
         setScammerShown((count) => count + 1)
         bumpRisk(fallback?.riskDelta ?? 2)
         setAdvice(fallback?.coach ?? DEFAULT_ADVICE)
-        if (trigger) setTriggers((t) => [...t, trigger])
+        if (trigger) setTriggers((items) => [...items, trigger])
         console.warn("Failed to generate AI turn", error)
       } finally {
         setTyping(false)
@@ -201,33 +288,31 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
 
   const handleHelp = useCallback(() => {
     if (!scenario || !started) return
-    setMessages((m) => [
-      ...m,
-      { id: nextId(), sender: "system", text: "你选择向子女求助并拨打 96110 核实 —— 正确的做法！" },
+    setMessages((items) => [
+      ...items,
+      { id: nextId(), sender: "system", text: "你选择向子女求助并拨打 96110 核实，这是正确的做法。" },
     ])
     bumpRisk(-4)
-    setGoodMoves((g) => g + 1)
-    setAdvice("非常好！遇到可疑情况，第一时间联系家人、拨打 96110 反诈专线核实，是最有效的自我保护。")
+    setGoodMoves((value) => value + 1)
+    setAdvice("非常好。遇到可疑情况，第一时间联系家人、拨打 96110 反诈专线核实，是最有效的自我保护。")
   }, [scenario, started, bumpRisk])
 
   const handleHangup = useCallback(() => {
     if (!scenario || !started || finished) return
     if (timeoutRef.current) clearTimeout(timeoutRef.current)
     setTyping(false)
-    setMessages((m) => [
-      ...m,
+    setMessages((items) => [
+      ...items,
       { id: nextId(), sender: "system", text: "你果断挂断/退出，成功脱离了这场骗局。" },
     ])
     bumpRisk(-6)
-    setGoodMoves((g) => g + 1)
+    setGoodMoves((value) => value + 1)
     setFinished(true)
-    setAdvice("挂断就是最好的反诈。挂断、不回拨陌生号、和家人确认，你已经赢了这一局。")
+    setAdvice("挂断就是最好的反诈。挂断、不回拨陌生号码、和家人确认，你已经赢了这一局。")
   }, [scenario, started, finished, bumpRisk])
-
 
   return (
     <div className="flex h-dvh flex-col bg-background">
-      {/* top bar */}
       <header className="flex items-center justify-between gap-4 border-b bg-card px-4 py-3 sm:px-6">
         <div className="flex items-center gap-3">
           <div className="flex size-10 items-center justify-center rounded-xl bg-primary text-primary-foreground">
@@ -253,6 +338,9 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
         </div>
 
         <div className="flex items-center gap-2">
+          <div className="hidden rounded-full border bg-muted/60 px-3 py-1 text-xs font-medium text-muted-foreground md:block">
+            {AI_SOURCE_LABELS[lastAiSource]}
+          </div>
           {started && (
             <Button variant="outline" size="sm" onClick={() => resetSession(scenario)}>
               <RotateCcw className="size-4" />
@@ -266,14 +354,11 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
         </div>
       </header>
 
-      {/* body */}
       <div className="grid flex-1 grid-cols-1 gap-4 overflow-hidden p-4 lg:grid-cols-[300px_minmax(0,1fr)_320px]">
-        {/* left rail */}
         <div className="hidden min-h-0 lg:block">
           <ScenarioRail scenarios={scenarios} activeId={scenario?.id ?? null} onSelect={handleSelect} started={started} />
         </div>
 
-        {/* center stage */}
         <main className="flex min-h-0 flex-col overflow-hidden rounded-3xl border bg-muted/30 shadow-sm">
           <div className="min-h-0 flex-1 overflow-hidden">
             <SimulationStage
@@ -305,7 +390,6 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
           ) : null}
         </main>
 
-        {/* right coach */}
         <div className="hidden min-h-0 lg:block">
           <CoachPanel
             risk={risk}
@@ -331,6 +415,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
         peakRisk={peakRisk}
         triggers={triggers}
         turns={scammerShown}
+        events={reportEvents}
       />
     </div>
   )

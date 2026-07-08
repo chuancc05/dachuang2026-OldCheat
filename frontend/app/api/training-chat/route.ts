@@ -9,8 +9,23 @@ interface ChatRequest {
   turnIndex: number
 }
 
+type AiProvider = "auto" | "deepseek" | "ollama"
+type AiSource = "deepseek" | "ollama" | "fallback"
+
+const AI_PROVIDER = normalizeProvider(process.env.AI_PROVIDER)
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY?.trim() ?? ""
+const DEEPSEEK_BASE_URL = process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com"
+const DEEPSEEK_MODEL_DIALOG = process.env.DEEPSEEK_MODEL_DIALOG ?? "deepseek-v4-flash"
 const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://127.0.0.1:11434"
-const OLLAMA_MODEL = process.env.DEFAULT_MODEL ?? "qwen2:7b"
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? process.env.DEFAULT_MODEL ?? "qwen2:7b"
+
+function normalizeProvider(value?: string): AiProvider {
+  const normalized = value?.trim().toLowerCase()
+  if (normalized === "deepseek" || normalized === "ollama" || normalized === "auto") {
+    return normalized
+  }
+  return "auto"
+}
 
 function splitTactics(method = ""): string[] {
   return method
@@ -26,16 +41,25 @@ function pickTrigger(scenario: Scenario, text: string, turnIndex: number): strin
 }
 
 function buildCoach(trigger: string): string {
-  if (trigger.includes("验证码")) return "任何验证码都等同于账户控制权。训练中可以识别话术，但现实中绝不能透露验证码。"
-  if (trigger.includes("转账") || trigger.includes("资金") || trigger.includes("垫付")) return "只要进入转账、垫付、资金验证环节，就应立刻停止沟通并联系家人或官方渠道核实。"
-  if (trigger.includes("阻止") || trigger.includes("隔离") || trigger.includes("保密")) return "不让你告诉家人、阻止你核实，是高危信号。越急越要停下来。"
-  if (trigger.includes("高收益") || trigger.includes("保本") || trigger.includes("内部")) return "“高收益、保本、内部名额”常被组合使用。不要下载陌生平台，不要被收益截图带节奏。"
+  if (trigger.includes("验证码")) {
+    return "任何验证码都等同于账户控制权。训练中可以识别话术，但现实中绝不能透露验证码。"
+  }
+  if (trigger.includes("转账") || trigger.includes("资金") || trigger.includes("垫付")) {
+    return "只要进入转账、垫付、资金验证环节，就应立刻停止沟通并联系家人或官方渠道核实。"
+  }
+  if (trigger.includes("阻止") || trigger.includes("隔离") || trigger.includes("保密")) {
+    return "不让你告诉家人、阻止你核实，是高危信号。越急越要停下来。"
+  }
+  if (trigger.includes("高收益") || trigger.includes("保本") || trigger.includes("内部")) {
+    return "高收益、保本、内部名额常被组合使用。不要下载陌生平台，不要被收益截图带节奏。"
+  }
   return `识别到“${trigger}”相关话术。先稳住节奏，不透露个人信息，不点击链接，不转账。`
 }
 
 function fallbackTurn(scenario: Scenario, turnIndex: number): ScriptTurn {
   const fallback = scenario.script[turnIndex % Math.max(scenario.script.length, 1)]
   if (fallback) return fallback
+
   const trigger = pickTrigger(scenario, scenario.method, turnIndex)
   return {
     line: "我这边只是按流程提醒您，您先别急着挂断，听我把情况说完。",
@@ -63,22 +87,23 @@ function buildSystemPrompt(scenario: Scenario): string {
     .join("\n")
 
   return [
-    "你正在为一个反诈骗训练系统生成安全的诈骗话术模拟回复。",
-    "你的角色是“诈骗场景模拟对象”，目标是帮助用户练习识别和拒绝骗局，而不是真实实施诈骗。",
-    `当前场景：${scenario.title}`,
-    `难度：${scenario.difficulty}`,
-    `场景背景：${scenario.tagline}`,
-    `核心套路：${scenario.method}`,
-    "来自数据集/场景库的参考话术如下。只参考语气、节奏和风险点，不要逐字复述：",
-    examples || "暂无样例。",
-    "回复要求：",
-    "1. 只输出模拟对象下一句话，不要解释，不要写旁白，不要标注角色名。",
-    "2. 每次 40-90 个汉字，口语化、自然、有场景推进感。",
-    "3. 根据用户上一句灵活回应，不要机械重复样例。用户如果说“说来听听”“怎么弄”“继续”，你要顺势推进当前骗局话术，而不是变成普通客服。",
-    "4. 必须持续扮演当前骗局中的模拟对象，可以表现催促、利诱、情感施压、阻止核实等训练话术，但必须保持安全边界。",
-    "5. 不得索要真实银行卡号、身份证号、密码、真实验证码、住址等敏感信息；如剧情需要，只能说“模拟验证码”“模拟账户”。",
-    "6. 不提供现实可执行的诈骗操作步骤，不给真实链接、真实账号或真实联系方式；如需推进剧情，只能使用“模拟链接”“模拟APP”“模拟账户”。",
-    "7. 禁止输出普通客服式寒暄，例如“有什么我能帮助您的吗”；你的任务是推进训练剧情。",
+    "You generate safe simulated scammer dialogue for an anti-fraud training app for older adults.",
+    "Always reply in Simplified Chinese.",
+    "Role: a simulated scammer persona inside a protected training environment, not a real criminal.",
+    `Scenario title: ${scenario.title}`,
+    `Difficulty: ${scenario.difficulty}`,
+    `Scenario background: ${scenario.tagline}`,
+    `Core tactics: ${scenario.method}`,
+    "Reference lines from the scenario library. Use their tone, pacing, and risk cues, but do not copy them mechanically:",
+    examples || "No reference lines.",
+    "Reply rules:",
+    "1. Output only the next sentence or short paragraph from the simulated persona. No explanations, no role labels.",
+    "2. Keep it natural, oral, and scenario-specific. 40-90 Chinese characters is ideal.",
+    "3. Respond to the user's last message and continue the current scam scenario instead of becoming a generic assistant.",
+    "4. You may simulate pressure, urgency, flattery, isolation, or fake authority for training purposes.",
+    "5. Never request real bank cards, ID numbers, passwords, real verification codes, home addresses, or other sensitive data.",
+    "6. If the plot needs payment, links, accounts, or codes, use clearly fictional placeholders such as mock account, mock app, mock link, or mock code.",
+    "7. Do not provide real executable fraud instructions, real links, real accounts, or real contact information.",
   ].join("\n")
 }
 
@@ -98,11 +123,47 @@ function buildMessages(scenario: Scenario, messages: Message[], userText: string
   ]
 }
 
-async function askOllama(scenario: Scenario, messages: Message[], userText: string): Promise<string> {
+async function withTimeout<T>(ms: number, task: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 45_000)
-
+  const timeout = setTimeout(() => controller.abort(), ms)
   try {
+    return await task(controller.signal)
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+async function askDeepSeek(scenario: Scenario, messages: Message[], userText: string): Promise<string> {
+  if (!DEEPSEEK_API_KEY) throw new Error("DeepSeek API key is not configured")
+
+  return withTimeout(45_000, async (signal) => {
+    const response = await fetch(`${DEEPSEEK_BASE_URL.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${DEEPSEEK_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: DEEPSEEK_MODEL_DIALOG,
+        messages: buildMessages(scenario, messages, userText),
+        stream: false,
+        temperature: 1.1,
+        max_tokens: 220,
+      }),
+      signal,
+    })
+
+    if (!response.ok) throw new Error(`DeepSeek returned ${response.status}`)
+
+    const data = await response.json()
+    const content = sanitizeAiText(data?.choices?.[0]?.message?.content ?? "")
+    if (!content) throw new Error("DeepSeek returned empty content")
+    return content
+  })
+}
+
+async function askOllama(scenario: Scenario, messages: Message[], userText: string): Promise<string> {
+  return withTimeout(45_000, async (signal) => {
     const response = await fetch(`${OLLAMA_URL.replace(/\/$/, "")}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -116,7 +177,7 @@ async function askOllama(scenario: Scenario, messages: Message[], userText: stri
           repeat_penalty: 1.12,
         },
       }),
-      signal: controller.signal,
+      signal,
     })
 
     if (!response.ok) throw new Error(`Ollama returned ${response.status}`)
@@ -125,9 +186,36 @@ async function askOllama(scenario: Scenario, messages: Message[], userText: stri
     const content = sanitizeAiText(data?.message?.content ?? "")
     if (!content) throw new Error("Ollama returned empty content")
     return content
-  } finally {
-    clearTimeout(timeout)
+  })
+}
+
+function providerOrder(): Exclude<AiSource, "fallback">[] {
+  if (AI_PROVIDER === "ollama") return ["ollama"]
+  if (AI_PROVIDER === "deepseek") return DEEPSEEK_API_KEY ? ["deepseek", "ollama"] : ["ollama"]
+  return DEEPSEEK_API_KEY ? ["deepseek", "ollama"] : ["ollama"]
+}
+
+async function generateAiLine(
+  scenario: Scenario,
+  messages: Message[],
+  userText: string,
+): Promise<{ line: string; source: Exclude<AiSource, "fallback">; errors: string[] }> {
+  const errors: string[] = []
+
+  for (const provider of providerOrder()) {
+    try {
+      const line =
+        provider === "deepseek"
+          ? await askDeepSeek(scenario, messages, userText)
+          : await askOllama(scenario, messages, userText)
+      return { line, source: provider, errors }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      errors.push(`${provider}: ${message}`)
+    }
   }
+
+  throw new Error(errors.join(" | ") || "No AI provider available")
 }
 
 export async function POST(request: NextRequest) {
@@ -144,21 +232,21 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const line = await askOllama(scenario, messages, userText.trim())
-    const trigger = pickTrigger(scenario, line, turnIndex)
+    const result = await generateAiLine(scenario, messages, userText.trim())
+    const trigger = pickTrigger(scenario, result.line, turnIndex)
     return NextResponse.json({
-      line,
+      line: result.line,
       trigger,
       riskDelta: Math.min(4.5, 1.8 + turnIndex * 0.35),
       coach: buildCoach(trigger),
-      source: "ollama",
+      source: result.source,
     })
   } catch (error) {
     const fallback = fallbackTurn(scenario, turnIndex)
     return NextResponse.json({
       ...fallback,
-      source: "fallback",
-      error: error instanceof Error ? error.message : "Unknown Ollama error",
+      source: "fallback" satisfies AiSource,
+      error: error instanceof Error ? error.message : "Unknown AI provider error",
     })
   }
 }
