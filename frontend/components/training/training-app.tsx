@@ -6,9 +6,15 @@ import { SimulationStage, type Message } from "@/components/training/simulation-
 import { CoachPanel } from "@/components/training/coach-panel"
 import { ReplyBar } from "@/components/training/reply-bar"
 import { ReportDialog, type ReportEvent, type ReportEvaluation } from "@/components/training/report-dialog"
+import {
+  VoiceCallPanel,
+  type VoiceCallStatus,
+  type VoiceProvider,
+  type VoiceTranscript,
+} from "@/components/training/voice-call-panel"
 import { Button } from "@/components/ui/button"
 import { evaluateReply, type Scenario } from "@/lib/scenarios"
-import { ShieldHalf, Play, RotateCcw, HelpCircle } from "lucide-react"
+import { ShieldHalf, Play, RotateCcw, HelpCircle, PhoneCall } from "lucide-react"
 
 const DEFAULT_ADVICE = "保持核实身份、拒绝验证码、拒绝转账的习惯。遇到催促和恐吓，先停下，再核实。"
 
@@ -20,6 +26,35 @@ const QUICK_REPLIES = [
 
 type AiSource = "idle" | "deepseek" | "ollama" | "fallback"
 
+type BrowserSpeechRecognitionEvent = {
+  resultIndex: number
+  results: {
+    length: number
+    [index: number]: {
+      isFinal?: boolean
+      [index: number]: {
+        transcript: string
+        confidence?: number
+      }
+    }
+  }
+}
+
+type BrowserSpeechRecognition = {
+  lang: string
+  continuous: boolean
+  interimResults: boolean
+  maxAlternatives: number
+  onresult: ((event: BrowserSpeechRecognitionEvent) => void) | null
+  onerror: ((event: { error?: string }) => void) | null
+  onend: (() => void) | null
+  start: () => void
+  stop: () => void
+  abort: () => void
+}
+
+type BrowserSpeechRecognitionConstructor = new () => BrowserSpeechRecognition
+
 const AI_SOURCE_LABELS: Record<AiSource, string> = {
   idle: "当前模型：待启动",
   deepseek: "当前模型：DeepSeek API",
@@ -29,6 +64,21 @@ const AI_SOURCE_LABELS: Record<AiSource, string> = {
 
 function parseAiSource(value: unknown): AiSource {
   return value === "deepseek" || value === "ollama" || value === "fallback" ? value : "fallback"
+}
+
+function getSpeechRecognitionConstructor(): BrowserSpeechRecognitionConstructor | null {
+  if (typeof window === "undefined") return null
+  const browserWindow = window as typeof window & {
+    SpeechRecognition?: BrowserSpeechRecognitionConstructor
+    webkitSpeechRecognition?: BrowserSpeechRecognitionConstructor
+  }
+  return browserWindow.SpeechRecognition ?? browserWindow.webkitSpeechRecognition ?? null
+}
+
+function formatDuration(s: number) {
+  const m = Math.floor(s / 60)
+  const sec = s % 60
+  return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`
 }
 
 function summarizeUserMove(hitDefensive: boolean, hitRisky: boolean): { evaluation: ReportEvaluation; reason: string } {
@@ -85,8 +135,29 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
   const [coreCompleteNotified, setCoreCompleteNotified] = useState(false)
   const [lastAiSource, setLastAiSource] = useState<AiSource>("idle")
   const [reportEvents, setReportEvents] = useState<ReportEvent[]>([])
+  const [voicePanelOpen, setVoicePanelOpen] = useState(false)
+  const [voiceStatus, setVoiceStatus] = useState<VoiceCallStatus>("idle")
+  const [voiceProvider, setVoiceProvider] = useState<VoiceProvider>("unavailable")
+  const [voiceTranscript, setVoiceTranscript] = useState<VoiceTranscript | null>(null)
+  const [voiceError, setVoiceError] = useState("")
 
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const recognitionRef = useRef<BrowserSpeechRecognition | null>(null)
+  const voiceLoopRef = useRef(false)
+  const finishedRef = useRef(false)
+  const transcriptRef = useRef("")
+  const transcriptConfidenceRef = useRef<number | undefined>(undefined)
+  const lastSpokenLineRef = useRef("")
+  const handleSendRef = useRef<(text: string) => Promise<string | null>>(async () => null)
+  const startVoiceListeningRef = useRef<() => void>(() => {})
+
+  const stopBrowserVoice = useCallback(() => {
+    recognitionRef.current?.abort()
+    recognitionRef.current = null
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel()
+    }
+  }, [])
 
   useEffect(() => {
     if (!started || finished) return
@@ -94,11 +165,22 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     return () => clearInterval(timer)
   }, [started, finished])
 
+  useEffect(() => {
+    finishedRef.current = finished
+    if (finished) {
+      voiceLoopRef.current = false
+      stopBrowserVoice()
+      setVoiceStatus("finished")
+    }
+  }, [finished, stopBrowserVoice])
+
   useEffect(
     () => () => {
       if (timeoutRef.current) clearTimeout(timeoutRef.current)
+      voiceLoopRef.current = false
+      stopBrowserVoice()
     },
-    [],
+    [stopBrowserVoice],
   )
 
   const bumpRisk = useCallback((delta: number) => {
@@ -111,6 +193,8 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
 
   const resetSession = useCallback((nextScenario: Scenario | null) => {
     if (timeoutRef.current) clearTimeout(timeoutRef.current)
+    voiceLoopRef.current = false
+    stopBrowserVoice()
     setScenario(nextScenario)
     setStarted(false)
     setFinished(false)
@@ -128,7 +212,13 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     setCoreCompleteNotified(false)
     setLastAiSource("idle")
     setReportEvents([])
-  }, [])
+    setVoicePanelOpen(false)
+    setVoiceStatus("idle")
+    setVoiceProvider("unavailable")
+    setVoiceTranscript(null)
+    setVoiceError("")
+    lastSpokenLineRef.current = ""
+  }, [stopBrowserVoice])
 
   const revealScammerLine = useCallback(
     (index: number, activeScenario: Scenario) => {
@@ -171,15 +261,19 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
   const totalTurns = scenario ? scenario.script.length : 0
   const progress = totalTurns ? Math.min(scammerShown, totalTurns) : 0
   const inputDisabled = !started || finished || typing
+  const voiceActive =
+    voicePanelOpen && !["idle", "paused", "finished", "error"].includes(voiceStatus)
+  const voiceDurationLabel = started ? formatDuration(duration) : "00:00"
 
   const handleSend = useCallback(
-    async (text: string) => {
-      if (!scenario || !started || finished || typing) return
+    async (text: string): Promise<string | null> => {
+      if (!scenario || !started || finished || typing) return null
 
       const userMessage: Message = { id: nextId(), sender: "user", text }
       const history = messages
       const turnIndex = scammerShown
       const scammerText = lastScammerText(history, scenario, turnIndex)
+      let nextScammerLine: string | null = null
       setMessages((items) => [...items, userMessage])
 
       const { delta, hitDefensive, hitRisky } = evaluateReply(text)
@@ -211,6 +305,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
         const line = typeof turn.line === "string" && turn.line.trim()
           ? turn.line.trim()
           : fallbackLine ?? "我这边再给您说明一下情况，您先别急着挂断。"
+        nextScammerLine = line
 
         setLastAiSource(source)
         setMessages((items) => [
@@ -250,13 +345,15 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
       } catch (error) {
         const fallback = scenario.script[turnIndex % Math.max(scenario.script.length, 1)]
         const trigger = fallback?.trigger
+        const fallbackLine = fallback?.line ?? "我这边再给您说明一下情况，您先别急着挂断。"
+        nextScammerLine = fallbackLine
         setLastAiSource("fallback")
         setMessages((items) => [
           ...items,
           {
             id: nextId(),
             sender: "scammer",
-            text: fallback?.line ?? "我这边再给您说明一下情况，您先别急着挂断。",
+            text: fallbackLine,
             trigger,
           },
           { id: nextId(), sender: "system", text: "AI 暂时未响应，本轮已使用场景库话术兜底。" },
@@ -282,9 +379,230 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
       } finally {
         setTyping(false)
       }
+      return nextScammerLine
     },
     [scenario, started, finished, typing, messages, scammerShown, bumpRisk, totalTurns, coreCompleteNotified],
   )
+
+  useEffect(() => {
+    handleSendRef.current = handleSend
+  }, [handleSend])
+
+  const speakScammerLine = useCallback(
+    (line: string) => {
+      const text = line.trim()
+      if (!text) return
+
+      recognitionRef.current?.abort()
+      recognitionRef.current = null
+      lastSpokenLineRef.current = text
+      setVoiceError("")
+      setVoiceStatus("speaking-scammer")
+
+      if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+        voiceLoopRef.current = false
+        setVoiceProvider("unavailable")
+        setVoiceStatus("paused")
+        setVoiceError("当前浏览器不能自动朗读，请暂时使用文字训练。")
+        return
+      }
+
+      window.speechSynthesis.cancel()
+      const utterance = new SpeechSynthesisUtterance(text)
+      utterance.lang = "zh-CN"
+      utterance.rate = 0.92
+      utterance.pitch = 1
+      utterance.onend = () => {
+        if (!voiceLoopRef.current || finishedRef.current) return
+        window.setTimeout(() => startVoiceListeningRef.current(), 350)
+      }
+      utterance.onerror = () => {
+        voiceLoopRef.current = false
+        setVoiceStatus("paused")
+        setVoiceError("浏览器朗读失败。你可以点“再说一遍”，或改用文字输入。")
+      }
+      window.speechSynthesis.speak(utterance)
+    },
+    [],
+  )
+
+  const startVoiceListening = useCallback(() => {
+    const Recognition = getSpeechRecognitionConstructor()
+    if (!Recognition) {
+      voiceLoopRef.current = false
+      setVoiceProvider("unavailable")
+      setVoiceStatus("error")
+      setVoiceError("当前浏览器不支持语音识别，请使用 Edge 或 Chrome，或先改用文字输入。")
+      return
+    }
+
+    recognitionRef.current?.abort()
+    transcriptRef.current = ""
+    transcriptConfidenceRef.current = undefined
+    setVoiceError("")
+    setVoiceTranscript(null)
+    setVoiceProvider("browser")
+
+    const recognition = new Recognition()
+    recognition.lang = "zh-CN"
+    recognition.continuous = false
+    recognition.interimResults = false
+    recognition.maxAlternatives = 1
+    recognitionRef.current = recognition
+
+    recognition.onresult = (event) => {
+      let text = ""
+      let confidence: number | undefined
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index]?.[0]
+        if (result?.transcript) {
+          text += result.transcript
+          confidence = result.confidence
+        }
+      }
+      transcriptRef.current = text.trim()
+      transcriptConfidenceRef.current = confidence
+      if (transcriptRef.current) {
+        setVoiceTranscript({
+          text: transcriptRef.current,
+          confidence,
+          provider: "browser",
+        })
+      }
+    }
+
+    recognition.onerror = (event) => {
+      if (recognitionRef.current !== recognition) return
+      recognitionRef.current = null
+      voiceLoopRef.current = false
+      setVoiceStatus("error")
+      setVoiceError(event.error === "not-allowed" ? "麦克风权限被拒绝，请允许麦克风后再试。" : "没听清，请再说一遍。")
+    }
+
+    recognition.onend = () => {
+      if (recognitionRef.current !== recognition) return
+      recognitionRef.current = null
+      const text = transcriptRef.current.trim()
+
+      if (!voiceLoopRef.current || finishedRef.current) return
+      if (!text) {
+        voiceLoopRef.current = false
+        setVoiceStatus("error")
+        setVoiceError("没听清，请再说一遍。")
+        return
+      }
+
+      setVoiceStatus("thinking")
+      void (async () => {
+        const nextLine = await handleSendRef.current(text)
+        if (!voiceLoopRef.current || finishedRef.current) return
+        if (nextLine) {
+          speakScammerLine(nextLine)
+        } else {
+          voiceLoopRef.current = false
+          setVoiceStatus("paused")
+        }
+      })()
+    }
+
+    try {
+      recognition.start()
+      setVoiceStatus("listening-user")
+    } catch (error) {
+      recognitionRef.current = null
+      voiceLoopRef.current = false
+      setVoiceStatus("error")
+      setVoiceError("语音识别启动失败，请稍后再试，或使用文字输入。")
+      console.warn("Failed to start speech recognition", error)
+    }
+  }, [speakScammerLine])
+
+  useEffect(() => {
+    startVoiceListeningRef.current = startVoiceListening
+  }, [startVoiceListening])
+
+  const handlePauseVoice = useCallback(() => {
+    voiceLoopRef.current = false
+    stopBrowserVoice()
+    setVoiceStatus("paused")
+    setVoiceError("")
+  }, [stopBrowserVoice])
+
+  const handleReplayVoice = useCallback(() => {
+    if (!scenario || !started || finished) return
+    const line = lastSpokenLineRef.current || lastScammerText(messages, scenario, scammerShown)
+    if (!line.trim()) return
+    setVoicePanelOpen(true)
+    voiceLoopRef.current = true
+    speakScammerLine(line)
+  }, [scenario, started, finished, messages, scammerShown, speakScammerLine])
+
+  const handleStartVoice = useCallback(async () => {
+    if (!scenario) return
+
+    setVoicePanelOpen(true)
+    setVoiceProvider("browser")
+    setVoiceError("")
+    setVoiceTranscript(null)
+
+    const Recognition = getSpeechRecognitionConstructor()
+    if (!Recognition) {
+      voiceLoopRef.current = false
+      setVoiceProvider("unavailable")
+      setVoiceStatus("error")
+      setVoiceError("当前浏览器不支持语音识别，请使用 Edge 或 Chrome，或先改用文字输入。")
+      return
+    }
+
+    if (typing) {
+      setVoiceStatus("paused")
+      setVoiceError("请等对方这句话说完后，再继续语音训练。")
+      return
+    }
+
+    setVoiceStatus("requesting-permission")
+    voiceLoopRef.current = true
+
+    try {
+      const stream = await navigator.mediaDevices?.getUserMedia?.({ audio: true })
+      stream?.getTracks().forEach((track) => track.stop())
+    } catch (error) {
+      voiceLoopRef.current = false
+      setVoiceStatus("error")
+      setVoiceError("麦克风权限被拒绝，请允许麦克风后再试。")
+      console.warn("Microphone permission was not granted", error)
+      return
+    }
+
+    if (!started) {
+      const firstTurn = scenario.script[0]
+      if (!firstTurn) {
+        voiceLoopRef.current = false
+        setVoiceStatus("error")
+        setVoiceError("当前场景没有可播放的话术，请切换场景。")
+        return
+      }
+
+      setStarted(true)
+      setTyping(true)
+      timeoutRef.current = setTimeout(() => {
+        setTyping(false)
+        setMessages((items) => [
+          ...items,
+          { id: nextId(), sender: "scammer", text: firstTurn.line, trigger: firstTurn.trigger },
+        ])
+        setScammerShown(1)
+        bumpRisk(firstTurn.riskDelta)
+        setAdvice(firstTurn.coach)
+        setLastAiSource("fallback")
+        if (firstTurn.trigger) setTriggers((items) => [...items, firstTurn.trigger as string])
+        speakScammerLine(firstTurn.line)
+      }, 500)
+      return
+    }
+
+    speakScammerLine(lastScammerText(messages, scenario, scammerShown))
+  }, [scenario, started, finished, typing, messages, scammerShown, bumpRisk, speakScammerLine])
 
   const handleHelp = useCallback(() => {
     if (!scenario || !started) return
@@ -300,6 +618,9 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
   const handleHangup = useCallback(() => {
     if (!scenario || !started || finished) return
     if (timeoutRef.current) clearTimeout(timeoutRef.current)
+    voiceLoopRef.current = false
+    stopBrowserVoice()
+    setVoiceStatus("finished")
     setTyping(false)
     setMessages((items) => [
       ...items,
@@ -309,7 +630,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     setGoodMoves((value) => value + 1)
     setFinished(true)
     setAdvice("挂断就是最好的反诈。挂断、不回拨陌生号码、和家人确认，你已经赢了这一局。")
-  }, [scenario, started, finished, bumpRisk])
+  }, [scenario, started, finished, bumpRisk, stopBrowserVoice])
 
   return (
     <div className="flex h-dvh flex-col bg-background">
@@ -360,6 +681,22 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
         </div>
 
         <main className="flex min-h-0 flex-col overflow-hidden rounded-3xl border bg-muted/30 shadow-sm">
+          <VoiceCallPanel
+            scenario={scenario}
+            active={voicePanelOpen}
+            started={started}
+            finished={finished}
+            status={voiceStatus}
+            provider={voiceProvider}
+            transcript={voiceTranscript}
+            error={voiceError}
+            durationLabel={voiceDurationLabel}
+            onStart={handleStartVoice}
+            onReplay={handleReplayVoice}
+            onStopVoice={handlePauseVoice}
+            onHelp={handleHelp}
+            onHangup={handleHangup}
+          />
           <div className="min-h-0 flex-1 overflow-hidden">
             <SimulationStage
               scenario={scenario}
@@ -373,10 +710,16 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
 
           {scenario && !started ? (
             <div className="border-t bg-card p-4">
-              <Button size="lg" className="w-full text-base" onClick={handleStart}>
-                <Play className="size-5" />
-                开始训练 · {scenario.title}
-              </Button>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Button size="lg" className="h-12 text-base" onClick={handleStart}>
+                  <Play className="size-5" />
+                  开始训练 · {scenario.title}
+                </Button>
+                <Button size="lg" variant="outline" className="h-12 text-base" onClick={handleStartVoice}>
+                  <PhoneCall className="size-5" />
+                  开始语音训练
+                </Button>
+              </div>
             </div>
           ) : scenario ? (
             <ReplyBar
@@ -385,6 +728,8 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
               onSend={handleSend}
               onHelp={handleHelp}
               onHangup={handleHangup}
+              onVoiceStart={voiceActive ? handlePauseVoice : handleStartVoice}
+              voiceActive={voiceActive}
               quickReplies={QUICK_REPLIES}
             />
           ) : null}

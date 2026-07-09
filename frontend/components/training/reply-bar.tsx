@@ -11,12 +11,22 @@ interface ReplyBarProps {
   onSend: (text: string) => void
   onHelp: () => void
   onHangup: () => void
+  onVoiceStart?: () => void
+  voiceActive?: boolean
   quickReplies: string[]
 }
 
-export function ReplyBar({ disabled, finished, onSend, onHelp, onHangup, quickReplies }: ReplyBarProps) {
+export function ReplyBar({
+  disabled,
+  finished,
+  onSend,
+  onHelp,
+  onHangup,
+  onVoiceStart,
+  voiceActive = false,
+  quickReplies,
+}: ReplyBarProps) {
   const [value, setValue] = useState("")
-  const [recording, setRecording] = useState(false)
 
   function submit() {
     const text = value.trim()
@@ -46,17 +56,17 @@ export function ReplyBar({ disabled, finished, onSend, onHelp, onHangup, quickRe
 
       <div className="flex items-end gap-2">
         <button
-          onClick={() => setRecording((r) => !r)}
+          onClick={onVoiceStart}
           disabled={disabled}
-          aria-label="语音输入"
+          aria-label="语音训练"
           className={cn(
             "flex size-11 shrink-0 items-center justify-center rounded-xl border transition-colors disabled:opacity-50",
-            recording
+            voiceActive
               ? "border-danger bg-danger/10 text-danger"
               : "border-border bg-background text-muted-foreground hover:text-foreground",
           )}
         >
-          {recording ? <Square className="size-4 fill-current" /> : <Mic className="size-5" />}
+          {voiceActive ? <Square className="size-4 fill-current" /> : <Mic className="size-5" />}
         </button>
 
         <div className="flex flex-1 items-end rounded-xl border bg-background focus-within:ring-2 focus-within:ring-ring">
@@ -73,7 +83,7 @@ export function ReplyBar({ disabled, finished, onSend, onHelp, onHangup, quickRe
               }
             }}
             placeholder={
-              finished ? "本场对话已结束，可切换新场景" : recording ? "正在录音…点击方块结束" : "输入你的回复，练习如何应对…"
+              finished ? "本场对话已结束，可切换新场景" : voiceActive ? "语音训练进行中，也可以在这里手动输入..." : "输入你的回复，练习如何应对..."
             }
             className="max-h-32 flex-1 resize-none bg-transparent px-3 py-3 text-[15px] outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed"
           />
