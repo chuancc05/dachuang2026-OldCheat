@@ -1,10 +1,55 @@
 import fs from "node:fs"
 import path from "node:path"
 
+loadEnvFile(path.resolve(process.cwd(), ".env.local"))
+
 const projectRoot = path.resolve(process.cwd(), "..")
 const outputPath = path.resolve(process.cwd(), "data", "rag-index.json")
 const ollamaUrl = process.env.OLLAMA_URL ?? "http://127.0.0.1:11434"
-const embeddingModel = process.env.RAG_EMBED_MODEL ?? "bge-m3"
+const embeddingProvider = normalizeEmbedProvider(process.env.RAG_EMBED_PROVIDER)
+const embeddingModel = normalizeEmbedModel(process.env.RAG_EMBED_MODEL, embeddingProvider)
+const embeddingDimensions = clampNumber(process.env.RAG_EMBED_DIMENSIONS, 64, 4096, 1024)
+const dashscopeApiKey = process.env.DASHSCOPE_API_KEY?.trim() ?? ""
+const dashscopeBaseUrl = process.env.DASHSCOPE_BASE_URL ?? "https://dashscope.aliyuncs.com/compatible-mode/v1"
+const batchSize = clampNumber(process.env.RAG_EMBED_BATCH_SIZE, 1, embeddingProvider === "dashscope" ? 10 : 64, embeddingProvider === "dashscope" ? 10 : 1)
+const embeddingPrecision = clampNumber(process.env.RAG_EMBED_PRECISION, 2, 8, 4)
+
+function loadEnvFile(filePath) {
+  if (!fs.existsSync(filePath)) return
+  const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/)
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith("#")) continue
+    const index = trimmed.indexOf("=")
+    if (index < 0) continue
+    const key = trimmed.slice(0, index).trim()
+    const value = trimmed.slice(index + 1).trim().replace(/^["']|["']$/g, "")
+    if (key && process.env[key] === undefined) process.env[key] = value
+  }
+}
+
+function clampNumber(value, min, max, fallback) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return fallback
+  return Math.max(min, Math.min(max, Math.floor(parsed)))
+}
+
+function normalizeEmbedProvider(value) {
+  const normalized = value?.trim().toLowerCase()
+  if (normalized === "dashscope" || normalized === "aliyun" || normalized === "alibaba") return "dashscope"
+  if (normalized === "none" || normalized === "off" || normalized === "lexical") return "none"
+  return "ollama"
+}
+
+function normalizeEmbedModel(value, provider) {
+  const model = value?.trim()
+  if (provider === "dashscope") {
+    if (!model || model.toLowerCase() === "qwen3-embedding") return "text-embedding-v4"
+    return model
+  }
+  if (provider === "ollama") return model || "bge-m3"
+  return model || "none"
+}
 
 function readJson(filePath) {
   try {
@@ -136,7 +181,18 @@ function buildSupplementalDocuments() {
   return docs
 }
 
-async function embed(text) {
+async function embedBatch(texts) {
+  if (embeddingProvider === "none") throw new Error("Vector embedding is disabled")
+  if (embeddingProvider === "dashscope") return embedBatchWithDashScope(texts)
+  return Promise.all(texts.map(embedWithOllama))
+}
+
+function compactVector(vector) {
+  const scale = 10 ** embeddingPrecision
+  return vector.map((value) => Math.round(Number(value) * scale) / scale)
+}
+
+async function embedWithOllama(text) {
   const response = await fetch(`${ollamaUrl.replace(/\/$/, "")}/api/embed`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -149,6 +205,34 @@ async function embed(text) {
   return vector
 }
 
+async function embedBatchWithDashScope(texts) {
+  if (!dashscopeApiKey) throw new Error("DASHSCOPE_API_KEY is not configured")
+
+  const response = await fetch(`${dashscopeBaseUrl.replace(/\/$/, "")}/embeddings`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${dashscopeApiKey}`,
+    },
+    body: JSON.stringify({
+      model: embeddingModel,
+      input: texts.map((text) => text.slice(0, 1200)),
+      dimensions: embeddingDimensions,
+      encoding_format: "float",
+    }),
+  })
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "")
+    throw new Error(`DashScope embed returned ${response.status}${detail ? `: ${detail.slice(0, 300)}` : ""}`)
+  }
+  const data = await response.json()
+  const vectors = data?.data?.map((item) => item.embedding)
+  if (!Array.isArray(vectors) || vectors.length !== texts.length || vectors.some((vector) => !Array.isArray(vector))) {
+    throw new Error("DashScope embed returned invalid vectors")
+  }
+  return vectors
+}
+
 const documents = [...buildScenarioDocuments(), ...buildLedgerDocuments(), ...buildSupplementalDocuments()]
 const seen = new Set()
 const deduped = documents.filter((doc) => {
@@ -158,29 +242,32 @@ const deduped = documents.filter((doc) => {
   return true
 })
 
-console.log(`Building RAG index with ${deduped.length} documents via ${embeddingModel}...`)
+console.log(`Building RAG index with ${deduped.length} documents via ${embeddingProvider}/${embeddingModel}...`)
 
-for (let index = 0; index < deduped.length; index += 1) {
-  const doc = deduped[index]
-  doc.embedding = await embed(`${doc.sceneName} ${doc.tags.join(" ")} ${doc.text}`)
-  if ((index + 1) % 25 === 0 || index + 1 === deduped.length) {
-    console.log(`Embedded ${index + 1}/${deduped.length}`)
+for (let index = 0; index < deduped.length; index += batchSize) {
+  const batch = deduped.slice(index, index + batchSize)
+  const vectors = await embedBatch(batch.map((doc) => `${doc.sceneName} ${doc.tags.join(" ")} ${doc.text}`))
+  vectors.forEach((vector, offset) => {
+    batch[offset].embedding = compactVector(vector)
+  })
+  const done = Math.min(index + batch.length, deduped.length)
+  if (done % 25 === 0 || done === deduped.length) {
+    console.log(`Embedded ${done}/${deduped.length}`)
   }
 }
 
 fs.mkdirSync(path.dirname(outputPath), { recursive: true })
 fs.writeFileSync(
   outputPath,
-  JSON.stringify(
-    {
-      version: "0.1.0",
-      embeddingModel,
-      generatedAt: new Date().toISOString(),
-      documents: deduped,
-    },
-    null,
-    2,
-  ),
+  JSON.stringify({
+    version: "0.1.0",
+    embeddingProvider,
+    embeddingModel,
+    embeddingDimensions,
+    embeddingPrecision,
+    generatedAt: new Date().toISOString(),
+    documents: deduped,
+  }),
   "utf8",
 )
 

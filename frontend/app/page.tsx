@@ -2,6 +2,7 @@ import fs from "node:fs"
 import path from "node:path"
 import { TrainingApp } from "@/components/training/training-app"
 import { SCENARIOS as FALLBACK_SCENARIOS, type Channel, type Difficulty, type Scenario, type ScriptTurn } from "@/lib/scenarios"
+import bundledScenarioLibrary from "@/data/scenario_library.json"
 
 export const dynamic = "force-dynamic"
 
@@ -253,13 +254,20 @@ function toScenario(scene: LibraryScene, index: number): Scenario {
   }
 }
 
+function mapLibraryToScenarios(library: ScenarioLibrary): Scenario[] {
+    const scenes = library.scenes ?? []
+    const mapped = scenes.map(toScenario).filter((scenario) => scenario.script.length > 0)
+  return mapped
+}
+
 function loadScenarios(): Scenario[] {
+  const bundled = mapLibraryToScenarios(bundledScenarioLibrary as ScenarioLibrary)
+  if (bundled.length > 0) return bundled
+
   const libraryPath = path.resolve(process.cwd(), "..", "data", "scenario_library.json")
   try {
     const raw = fs.readFileSync(libraryPath, "utf8")
-    const library = JSON.parse(raw) as ScenarioLibrary
-    const scenes = library.scenes ?? []
-    const mapped = scenes.map(toScenario).filter((scenario) => scenario.script.length > 0)
+    const mapped = mapLibraryToScenarios(JSON.parse(raw) as ScenarioLibrary)
     return mapped.length > 0 ? mapped : FALLBACK_SCENARIOS
   } catch (error) {
     console.warn("Failed to load dynamic scenario library, using fallback scenarios.", error)

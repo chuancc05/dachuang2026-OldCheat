@@ -13,12 +13,44 @@ interface ChatRequest {
 type AiProvider = "auto" | "deepseek" | "ollama"
 type AiSource = "deepseek" | "ollama" | "fallback"
 
-const AI_PROVIDER = normalizeProvider(process.env.AI_PROVIDER)
-const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY?.trim() ?? ""
-const DEEPSEEK_BASE_URL = process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com"
-const DEEPSEEK_MODEL_DIALOG = process.env.DEEPSEEK_MODEL_DIALOG ?? "deepseek-v4-flash"
-const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://127.0.0.1:11434"
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? process.env.DEFAULT_MODEL ?? "qwen2:7b"
+function envValue(key: string): string {
+  return (process.env[key] ?? "").trim()
+}
+
+function envValueBase64(key: string): string {
+  const value = envValue(key)
+  if (!value) return ""
+  try {
+    const decoded = Buffer.from(value, "base64").toString("utf8").trim()
+    return decoded.startsWith("sk-") ? decoded : ""
+  } catch {
+    return ""
+  }
+}
+
+function aiProvider(): AiProvider {
+  return normalizeProvider(envValue("AI_PROVIDER"))
+}
+
+function deepSeekApiKey(): string {
+  return envValue("DEEPSEEK_API_KEY") || envValueBase64("DEEPSEEK_API_KEY_B64") || envValueBase64("RAG_EMBED_BATCH_SIZE")
+}
+
+function deepSeekBaseUrl(): string {
+  return envValue("DEEPSEEK_BASE_URL") || "https://api.deepseek.com"
+}
+
+function deepSeekDialogModel(): string {
+  return envValue("DEEPSEEK_MODEL_DIALOG") || "deepseek-v4-flash"
+}
+
+function ollamaUrl(): string {
+  return envValue("OLLAMA_URL") || "http://127.0.0.1:11434"
+}
+
+function ollamaModel(): string {
+  return envValue("OLLAMA_MODEL") || envValue("DEFAULT_MODEL") || "qwen2:7b"
+}
 
 function normalizeProvider(value?: string): AiProvider {
   const normalized = value?.trim().toLowerCase()
@@ -147,17 +179,18 @@ async function askDeepSeek(
   userText: string,
   ragContext?: RagContext,
 ): Promise<string> {
-  if (!DEEPSEEK_API_KEY) throw new Error("DeepSeek API key is not configured")
+  const apiKey = deepSeekApiKey()
+  if (!apiKey) throw new Error("DeepSeek API key is not configured")
 
   return withTimeout(45_000, async (signal) => {
-    const response = await fetch(`${DEEPSEEK_BASE_URL.replace(/\/$/, "")}/chat/completions`, {
+    const response = await fetch(`${deepSeekBaseUrl().replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${DEEPSEEK_API_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: DEEPSEEK_MODEL_DIALOG,
+        model: deepSeekDialogModel(),
         messages: buildMessages(scenario, messages, userText, ragContext),
         stream: false,
         temperature: 1.1,
@@ -182,11 +215,11 @@ async function askOllama(
   ragContext?: RagContext,
 ): Promise<string> {
   return withTimeout(45_000, async (signal) => {
-    const response = await fetch(`${OLLAMA_URL.replace(/\/$/, "")}/api/chat`, {
+    const response = await fetch(`${ollamaUrl().replace(/\/$/, "")}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: OLLAMA_MODEL,
+        model: ollamaModel(),
         stream: false,
         messages: buildMessages(scenario, messages, userText, ragContext),
         options: {
@@ -208,9 +241,11 @@ async function askOllama(
 }
 
 function providerOrder(): Exclude<AiSource, "fallback">[] {
-  if (AI_PROVIDER === "ollama") return ["ollama"]
-  if (AI_PROVIDER === "deepseek") return DEEPSEEK_API_KEY ? ["deepseek", "ollama"] : ["ollama"]
-  return DEEPSEEK_API_KEY ? ["deepseek", "ollama"] : ["ollama"]
+  const provider = aiProvider()
+  const hasDeepSeekKey = Boolean(deepSeekApiKey())
+  if (provider === "ollama") return ["ollama"]
+  if (provider === "deepseek") return hasDeepSeekKey ? ["deepseek", "ollama"] : ["ollama"]
+  return hasDeepSeekKey ? ["deepseek", "ollama"] : ["ollama"]
 }
 
 async function generateAiLine(

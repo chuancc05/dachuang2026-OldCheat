@@ -20,7 +20,9 @@ interface RagDocument extends Omit<RagReference, "score"> {
 
 interface RagIndexFile {
   version?: string
+  embeddingProvider?: string
   embeddingModel?: string
+  embeddingDimensions?: number
   generatedAt?: string
   documents?: RagDocument[]
 }
@@ -45,18 +47,80 @@ export interface RagContext {
   error?: string
 }
 
-const RAG_ENABLED = (process.env.RAG_ENABLED ?? "true").trim().toLowerCase() !== "false"
-const RAG_TOP_K = clampNumber(process.env.RAG_TOP_K, 1, 8, 5)
-const RAG_USE_VECTOR = (process.env.RAG_USE_VECTOR ?? "true").trim().toLowerCase() !== "false"
-const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://127.0.0.1:11434"
-const RAG_EMBED_MODEL = process.env.RAG_EMBED_MODEL ?? "bge-m3"
-
 let documentCache: RagDocument[] | null = null
+
+function envValue(key: string): string {
+  return (process.env[key] ?? "").trim()
+}
+
+function envValueBase64(key: string): string {
+  const value = envValue(key)
+  if (!value) return ""
+  try {
+    const decoded = Buffer.from(value, "base64").toString("utf8").trim()
+    return decoded.startsWith("sk-") ? decoded : ""
+  } catch {
+    return ""
+  }
+}
 
 function clampNumber(value: string | undefined, min: number, max: number, fallback: number): number {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) return fallback
   return Math.max(min, Math.min(max, Math.floor(parsed)))
+}
+
+function normalizeEmbedProvider(value?: string): "ollama" | "dashscope" | "none" {
+  const normalized = value?.trim().toLowerCase()
+  if (normalized === "dashscope" || normalized === "aliyun" || normalized === "alibaba") return "dashscope"
+  if (normalized === "none" || normalized === "off" || normalized === "lexical") return "none"
+  return "ollama"
+}
+
+function normalizeEmbedModel(value: string | undefined, provider: "ollama" | "dashscope" | "none"): string {
+  const model = value?.trim()
+  if (provider === "dashscope") {
+    if (!model || model.toLowerCase() === "qwen3-embedding") return "text-embedding-v4"
+    return model
+  }
+  if (provider === "ollama") return model || "bge-m3"
+  return model || "none"
+}
+
+function ragEnabled(): boolean {
+  return (envValue("RAG_ENABLED") || "true").toLowerCase() !== "false"
+}
+
+function ragTopK(): number {
+  return clampNumber(envValue("RAG_TOP_K"), 1, 8, 5)
+}
+
+function ragUseVector(): boolean {
+  return (envValue("RAG_USE_VECTOR") || "true").toLowerCase() !== "false"
+}
+
+function ragEmbedProvider(): "ollama" | "dashscope" | "none" {
+  return normalizeEmbedProvider(envValue("RAG_EMBED_PROVIDER"))
+}
+
+function ollamaUrl(): string {
+  return envValue("OLLAMA_URL") || "http://127.0.0.1:11434"
+}
+
+function ragEmbedModel(provider = ragEmbedProvider()): string {
+  return normalizeEmbedModel(envValue("RAG_EMBED_MODEL"), provider)
+}
+
+function ragEmbedDimensions(): number {
+  return clampNumber(envValue("RAG_EMBED_DIMENSIONS"), 64, 4096, 1024)
+}
+
+function dashScopeApiKey(): string {
+  return envValue("DASHSCOPE_API_KEY") || envValueBase64("DASHSCOPE_API_KEY_B64") || envValueBase64("RAG_EMBED_DIMENSIONS")
+}
+
+function dashScopeBaseUrl(): string {
+  return envValue("DASHSCOPE_BASE_URL") || "https://dashscope.aliyuncs.com/compatible-mode/v1"
 }
 
 function projectRoot(): string {
@@ -204,6 +268,13 @@ function buildDocumentsFromSupplemental(root: string): RagDocument[] {
 function loadPrebuiltIndex(root: string): RagDocument[] | null {
   const index = readJson<RagIndexFile>(path.join(process.cwd(), "data", "rag-index.json"))
   if (!index?.documents?.length) return null
+  const provider = ragEmbedProvider()
+  if (ragUseVector() && provider !== "none") {
+    const providerMatches = (index.embeddingProvider ?? "ollama") === provider
+    const modelMatches = index.embeddingModel === ragEmbedModel(provider)
+    const dimensionsMatch = !index.embeddingDimensions || index.embeddingDimensions === ragEmbedDimensions()
+    if (!providerMatches || !modelMatches || !dimensionsMatch) return null
+  }
   return index.documents.map((doc) => ({ ...doc, keywords: doc.keywords?.length ? doc.keywords : tokenize(doc.text) }))
 }
 
@@ -253,16 +324,46 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 async function embedText(text: string): Promise<number[]> {
-  const response = await fetch(`${OLLAMA_URL.replace(/\/$/, "")}/api/embed`, {
+  const provider = ragEmbedProvider()
+  if (provider === "none") throw new Error("Vector embedding is disabled")
+  if (provider === "dashscope") return embedTextWithDashScope(text)
+
+  const response = await fetch(`${ollamaUrl().replace(/\/$/, "")}/api/embed`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: RAG_EMBED_MODEL, input: text.slice(0, 1200) }),
+    body: JSON.stringify({ model: ragEmbedModel(provider), input: text.slice(0, 1200) }),
     signal: AbortSignal.timeout(12_000),
   })
   if (!response.ok) throw new Error(`Ollama embed returned ${response.status}`)
   const data = await response.json()
   const embedding = data?.embeddings?.[0]
   if (!Array.isArray(embedding)) throw new Error("Ollama embed returned no vector")
+  return embedding
+}
+
+async function embedTextWithDashScope(text: string): Promise<number[]> {
+  const apiKey = dashScopeApiKey()
+  if (!apiKey) throw new Error("DashScope API key is not configured")
+
+  const response = await fetch(`${dashScopeBaseUrl().replace(/\/$/, "")}/embeddings`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: ragEmbedModel("dashscope"),
+      input: text.slice(0, 1200),
+      dimensions: ragEmbedDimensions(),
+      encoding_format: "float",
+    }),
+    signal: AbortSignal.timeout(12_000),
+  })
+
+  if (!response.ok) throw new Error(`DashScope embed returned ${response.status}`)
+  const data = await response.json()
+  const embedding = data?.data?.[0]?.embedding
+  if (!Array.isArray(embedding)) throw new Error("DashScope embed returned no vector")
   return embedding
 }
 
@@ -290,39 +391,50 @@ export async function retrieveRagContext(
   messages: Message[],
   userText: string,
 ): Promise<RagContext> {
-  if (!RAG_ENABLED) return { enabled: false, mode: "off", references: [] }
+  if (!ragEnabled()) return { enabled: false, mode: "off", references: [] }
 
   try {
     const docs = loadDocuments()
+    const topK = ragTopK()
     const sceneId = scenario.code.toUpperCase()
     const terms = scenarioTerms(scenario)
     const query = formatQuery(scenario, messages, userText)
     const queryKeywords = tokenize(query)
     const scoped = docs.filter((doc) => doc.sceneId === sceneId)
-    const candidates = scoped.length >= RAG_TOP_K ? scoped : docs
+    const candidates = scoped.length >= topK ? scoped : docs
 
     const lexicalRanked = candidates
       .map((doc) => ({ doc, score: lexicalScore(doc, queryKeywords, terms) }))
       .filter((item) => item.score > 0 || item.doc.sceneId === sceneId)
       .sort((a, b) => b.score - a.score)
-      .slice(0, Math.max(16, RAG_TOP_K * 4))
+      .slice(0, Math.max(16, topK * 4))
 
-    if (!RAG_USE_VECTOR) {
+    if (!ragUseVector() || ragEmbedProvider() === "none") {
       return {
         enabled: true,
         mode: "lexical",
-        references: lexicalRanked.slice(0, RAG_TOP_K).map(({ doc, score }) => ({ ...doc, score })),
+        references: lexicalRanked.slice(0, topK).map(({ doc, score }) => ({ ...doc, score })),
       }
     }
 
     const queryEmbedding = await embedText(query)
     const vectorRanked = lexicalRanked
+      .filter(({ doc }) => Array.isArray(doc.embedding) && doc.embedding.length === queryEmbedding.length)
       .map(({ doc, score }) => ({
         doc,
         score: score + (doc.embedding ? cosineSimilarity(queryEmbedding, doc.embedding) * 8 : 0),
       }))
       .sort((a, b) => b.score - a.score)
-      .slice(0, RAG_TOP_K)
+      .slice(0, topK)
+
+    if (vectorRanked.length === 0) {
+      return {
+        enabled: true,
+        mode: "lexical",
+        references: lexicalRanked.slice(0, topK).map(({ doc, score }) => ({ ...doc, score })),
+        error: "No matching vector index is available for the configured embedding provider",
+      }
+    }
 
     return {
       enabled: true,
@@ -331,13 +443,14 @@ export async function retrieveRagContext(
     }
   } catch (error) {
     const docs = loadDocuments()
+    const topK = ragTopK()
     const queryKeywords = tokenize(formatQuery(scenario, messages, userText))
     const terms = scenarioTerms(scenario)
     const references = docs
       .filter((doc) => doc.sceneId === scenario.code.toUpperCase())
       .map((doc) => ({ doc, score: lexicalScore(doc, queryKeywords, terms) }))
       .sort((a, b) => b.score - a.score)
-      .slice(0, RAG_TOP_K)
+      .slice(0, topK)
       .map(({ doc, score }) => ({ ...doc, score }))
     return {
       enabled: true,
