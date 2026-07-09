@@ -29,7 +29,7 @@ export type VoiceCallStatus =
   | "finished"
   | "error"
 
-export type VoiceProvider = "browser" | "aliyun" | "unavailable"
+export type VoiceProvider = "browser" | "dashscope" | "aliyun" | "unavailable"
 
 export type VoiceTranscript = {
   text: string
@@ -104,6 +104,7 @@ const STATUS_COPY: Record<VoiceCallStatus, { title: string; detail: string; icon
 
 const PROVIDER_COPY: Record<VoiceProvider, string> = {
   browser: "浏览器语音",
+  dashscope: "阿里云实时语音",
   aliyun: "阿里云语音",
   unavailable: "语音不可用",
 }

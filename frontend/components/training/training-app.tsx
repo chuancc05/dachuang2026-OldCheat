@@ -14,6 +14,7 @@ import {
 } from "@/components/training/voice-call-panel"
 import { Button } from "@/components/ui/button"
 import { evaluateReply, type Scenario } from "@/lib/scenarios"
+import { RealtimeVoiceClient } from "@/lib/voice/realtime-voice-client"
 import { ShieldHalf, Play, RotateCcw, HelpCircle, PhoneCall } from "lucide-react"
 
 const DEFAULT_ADVICE = "保持核实身份、拒绝验证码、拒绝转账的习惯。遇到催促和恐吓，先停下，再核实。"
@@ -61,6 +62,8 @@ const AI_SOURCE_LABELS: Record<AiSource, string> = {
   ollama: "当前模型：本地 Ollama",
   fallback: "当前模型：场景库兜底",
 }
+
+const VOICE_GATEWAY_URL = process.env.NEXT_PUBLIC_VOICE_GATEWAY_URL || "ws://127.0.0.1:8787/voice"
 
 function parseAiSource(value: unknown): AiSource {
   return value === "deepseek" || value === "ollama" || value === "fallback" ? value : "fallback"
@@ -143,7 +146,10 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
 
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null)
+  const realtimeClientRef = useRef<RealtimeVoiceClient | null>(null)
   const voiceLoopRef = useRef(false)
+  const realtimeVoiceRef = useRef(false)
+  const realtimeSubmittingRef = useRef(false)
   const finishedRef = useRef(false)
   const transcriptRef = useRef("")
   const transcriptConfidenceRef = useRef<number | undefined>(undefined)
@@ -159,6 +165,12 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     }
   }, [])
 
+  const stopRealtimeVoice = useCallback(() => {
+    realtimeVoiceRef.current = false
+    realtimeClientRef.current?.close()
+    realtimeClientRef.current = null
+  }, [])
+
   useEffect(() => {
     if (!started || finished) return
     const timer = setInterval(() => setDuration((value) => value + 1), 1000)
@@ -169,18 +181,20 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     finishedRef.current = finished
     if (finished) {
       voiceLoopRef.current = false
+      stopRealtimeVoice()
       stopBrowserVoice()
       setVoiceStatus("finished")
     }
-  }, [finished, stopBrowserVoice])
+  }, [finished, stopBrowserVoice, stopRealtimeVoice])
 
   useEffect(
     () => () => {
       if (timeoutRef.current) clearTimeout(timeoutRef.current)
       voiceLoopRef.current = false
+      stopRealtimeVoice()
       stopBrowserVoice()
     },
-    [stopBrowserVoice],
+    [stopBrowserVoice, stopRealtimeVoice],
   )
 
   const bumpRisk = useCallback((delta: number) => {
@@ -194,6 +208,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
   const resetSession = useCallback((nextScenario: Scenario | null) => {
     if (timeoutRef.current) clearTimeout(timeoutRef.current)
     voiceLoopRef.current = false
+    stopRealtimeVoice()
     stopBrowserVoice()
     setScenario(nextScenario)
     setStarted(false)
@@ -218,7 +233,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     setVoiceTranscript(null)
     setVoiceError("")
     lastSpokenLineRef.current = ""
-  }, [stopBrowserVoice])
+  }, [stopBrowserVoice, stopRealtimeVoice])
 
   const revealScammerLine = useCallback(
     (index: number, activeScenario: Scenario) => {
@@ -523,10 +538,11 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
 
   const handlePauseVoice = useCallback(() => {
     voiceLoopRef.current = false
+    stopRealtimeVoice()
     stopBrowserVoice()
     setVoiceStatus("paused")
     setVoiceError("")
-  }, [stopBrowserVoice])
+  }, [stopBrowserVoice, stopRealtimeVoice])
 
   const handleReplayVoice = useCallback(() => {
     if (!scenario || !started || finished) return
@@ -534,10 +550,16 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     if (!line.trim()) return
     setVoicePanelOpen(true)
     voiceLoopRef.current = true
+    if (realtimeVoiceRef.current && realtimeClientRef.current) {
+      setVoiceProvider("dashscope")
+      lastSpokenLineRef.current = line
+      void realtimeClientRef.current.speak(line)
+      return
+    }
     speakScammerLine(line)
   }, [scenario, started, finished, messages, scammerShown, speakScammerLine])
 
-  const handleStartVoice = useCallback(async () => {
+  const handleStartBrowserVoice = useCallback(async () => {
     if (!scenario) return
 
     setVoicePanelOpen(true)
@@ -604,6 +626,148 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     speakScammerLine(lastScammerText(messages, scenario, scammerShown))
   }, [scenario, started, finished, typing, messages, scammerShown, bumpRisk, speakScammerLine])
 
+  const handleStartRealtimeVoice = useCallback(async () => {
+    if (!scenario) return false
+    if (typing) {
+      setVoicePanelOpen(true)
+      setVoiceStatus("paused")
+      setVoiceError("请等对方这句话说完后，再继续语音训练。")
+      return true
+    }
+
+    setVoicePanelOpen(true)
+    setVoiceProvider("dashscope")
+    setVoiceStatus("requesting-permission")
+    setVoiceError("")
+    setVoiceTranscript(null)
+    stopBrowserVoice()
+    stopRealtimeVoice()
+
+    const client = new RealtimeVoiceClient({
+      url: VOICE_GATEWAY_URL,
+      onPartial: (text) => {
+        if (!realtimeVoiceRef.current || !text.trim()) return
+        setVoiceTranscript({ text: text.trim(), provider: "dashscope" })
+      },
+      onFinal: (text) => {
+        const transcript = text.trim()
+        if (!realtimeVoiceRef.current || !transcript || realtimeSubmittingRef.current) return
+
+        realtimeSubmittingRef.current = true
+        client.stopListening(false)
+        setVoiceTranscript({ text: transcript, provider: "dashscope" })
+        setVoiceStatus("thinking")
+
+        void (async () => {
+          try {
+            const nextLine = await handleSendRef.current(transcript)
+            if (!realtimeVoiceRef.current || finishedRef.current) return
+            if (nextLine) {
+              lastSpokenLineRef.current = nextLine
+              await client.speak(nextLine)
+            } else {
+              voiceLoopRef.current = false
+              realtimeVoiceRef.current = false
+              setVoiceStatus("paused")
+            }
+          } catch (error) {
+            voiceLoopRef.current = false
+            realtimeVoiceRef.current = false
+            setVoiceStatus("error")
+            setVoiceError("实时语音提交失败，请先改用文字训练或浏览器语音。")
+            console.warn("Realtime voice turn failed", error)
+          } finally {
+            realtimeSubmittingRef.current = false
+          }
+        })()
+      },
+      onTtsStart: () => {
+        if (!realtimeVoiceRef.current) return
+        setVoiceProvider("dashscope")
+        setVoiceStatus("speaking-scammer")
+        setVoiceError("")
+      },
+      onTtsEnd: () => {
+        if (!realtimeVoiceRef.current || finishedRef.current) return
+        setVoiceStatus("listening-user")
+        setVoiceTranscript(null)
+        void client.startListening().catch((error) => {
+          if (!realtimeVoiceRef.current) return
+          voiceLoopRef.current = false
+          realtimeVoiceRef.current = false
+          setVoiceStatus("error")
+          setVoiceError("实时语音识别启动失败，已保留文字训练入口。")
+          console.warn("Realtime ASR failed", error)
+        })
+      },
+      onError: (message, scope) => {
+        console.warn("Realtime voice gateway error", scope, message)
+        if (!realtimeVoiceRef.current) return
+        voiceLoopRef.current = false
+        realtimeVoiceRef.current = false
+        setVoiceStatus("error")
+        setVoiceError("阿里云实时语音暂时不可用，已保留文字训练入口，也可以再次点击改用浏览器语音。")
+      },
+    })
+
+    try {
+      realtimeClientRef.current = client
+      realtimeVoiceRef.current = true
+      voiceLoopRef.current = true
+      await client.connect()
+
+      if (!started) {
+        const firstTurn = scenario.script[0]
+        if (!firstTurn) {
+          voiceLoopRef.current = false
+          realtimeVoiceRef.current = false
+          setVoiceStatus("error")
+          setVoiceError("当前场景没有可播放的话术，请切换场景。")
+          return true
+        }
+
+        setStarted(true)
+        setMessages((items) => [
+          ...items,
+          { id: nextId(), sender: "scammer", text: firstTurn.line, trigger: firstTurn.trigger },
+        ])
+        setScammerShown(1)
+        bumpRisk(firstTurn.riskDelta)
+        setAdvice(firstTurn.coach)
+        setLastAiSource("fallback")
+        if (firstTurn.trigger) setTriggers((items) => [...items, firstTurn.trigger as string])
+        lastSpokenLineRef.current = firstTurn.line
+        await client.speak(firstTurn.line)
+        return true
+      }
+
+      const line = lastScammerText(messages, scenario, scammerShown)
+      lastSpokenLineRef.current = line
+      await client.speak(line)
+      return true
+    } catch (error) {
+      console.warn("Realtime voice gateway unavailable, falling back to browser voice", error)
+      realtimeVoiceRef.current = false
+      realtimeClientRef.current?.close()
+      realtimeClientRef.current = null
+      return false
+    }
+  }, [
+    scenario,
+    started,
+    typing,
+    messages,
+    scammerShown,
+    bumpRisk,
+    stopBrowserVoice,
+    stopRealtimeVoice,
+  ])
+
+  const handleStartVoice = useCallback(async () => {
+    const realtimeStarted = await handleStartRealtimeVoice()
+    if (!realtimeStarted) await handleStartBrowserVoice()
+  }, [handleStartRealtimeVoice, handleStartBrowserVoice])
+
   const handleHelp = useCallback(() => {
     if (!scenario || !started) return
     setMessages((items) => [
@@ -619,6 +783,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     if (!scenario || !started || finished) return
     if (timeoutRef.current) clearTimeout(timeoutRef.current)
     voiceLoopRef.current = false
+    stopRealtimeVoice()
     stopBrowserVoice()
     setVoiceStatus("finished")
     setTyping(false)
@@ -630,7 +795,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     setGoodMoves((value) => value + 1)
     setFinished(true)
     setAdvice("挂断就是最好的反诈。挂断、不回拨陌生号码、和家人确认，你已经赢了这一局。")
-  }, [scenario, started, finished, bumpRisk, stopBrowserVoice])
+  }, [scenario, started, finished, bumpRisk, stopBrowserVoice, stopRealtimeVoice])
 
   return (
     <div className="flex h-dvh flex-col bg-background">

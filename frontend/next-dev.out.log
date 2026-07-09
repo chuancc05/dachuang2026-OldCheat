@@ -1,0 +1,46 @@
+✓ Lockfile passes supply-chain policies (verified 4h ago)
+Lockfile is up to date, resolution step is skipped
+Already up to date
+
+
+   ╭──────────────────────────────────────────╮
+   │                                          │
+   │   Update available! 11.7.0 → 11.10.0.    │
+   │   Changelog: https://pnpm.io/v/11.10.0   │
+   │     To update, run: pnpm add -g pnpm     │
+   │                                          │
+   ╰──────────────────────────────────────────╯
+
+Done in 1.1s using pnpm v11.7.0
+   ▲ Next.js 15.5.20
+   - Local:        http://localhost:3000
+   - Network:      http://10.55.197.74:3000
+   - Environments: .env.local
+
+ ✓ Starting...
+ ✓ Ready in 14.4s
+ ○ Compiling / ...
+ ✓ Compiled / in 1388ms (715 modules)
+ GET / 200 in 2256ms
+ GET / 200 in 196ms
+ ○ Compiling /api/training-chat ...
+ ✓ Compiled /api/training-chat in 6.9s (750 modules)
+ ✓ Compiled in 714ms (323 modules)
+ GET / 200 in 712ms
+ GET / 200 in 200ms
+ ✓ Compiled in 218ms (323 modules)
+ GET / 200 in 40ms
+ POST /api/training-chat 200 in 11764ms
+ POST /api/training-chat 200 in 3187ms
+ POST /api/training-chat 200 in 3519ms
+ POST /api/training-chat 200 in 3944ms
+ POST /api/training-chat 200 in 3887ms
+ POST /api/training-chat 200 in 4501ms
+ POST /api/training-chat 200 in 3970ms
+ POST /api/training-chat 200 in 4252ms
+ POST /api/training-chat 200 in 4789ms
+ POST /api/training-chat 200 in 4146ms
+ POST /api/training-chat 200 in 3882ms
+ POST /api/training-chat 200 in 4691ms
+ ✓ Compiled /api/training-report in 490ms (738 modules)
+ POST /api/training-report 200 in 10303ms
