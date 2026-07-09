@@ -93,7 +93,8 @@ async function handleClientEvent(client, session, event) {
       break
     case "tts.speak":
       if (typeof event.text === "string" && event.text.trim()) {
-        await speakText(client, session, event.text.trim())
+        const speech = splitSpeechCue(event.text.trim())
+        await speakText(client, session, speech.speechText, speech.instructions)
       }
       break
     case "tts.stop":
@@ -185,9 +186,10 @@ function startAsr(client, session) {
   })
 }
 
-function speakText(client, session, text) {
+function speakText(client, session, text, instructions = "") {
   closeSocket(session.tts)
   session.ttsPendingText = text
+  const supportsInstructions = /instruct/i.test(TTS_URL)
 
   return new Promise((resolvePromise) => {
     const tts = new WebSocket(TTS_URL, { headers: upstreamHeaders() })
@@ -213,21 +215,16 @@ function speakText(client, session, text) {
     }
 
     tts.on("open", () => {
-      tts.send(
-        JSON.stringify({
-          event_id: eventId("tts_update"),
-          type: "session.update",
-          session: {
-            voice: TTS_VOICE,
-            mode: "server_commit",
-            language_type: "Chinese",
-            response_format: "pcm",
-            sample_rate: TTS_SAMPLE_RATE,
-            instructions: "",
-            optimize_instructions: false,
-          },
-        }),
-      )
+      const ttsSession = {
+        voice: TTS_VOICE,
+        mode: "server_commit",
+        language_type: "Chinese",
+        response_format: "pcm",
+        sample_rate: TTS_SAMPLE_RATE,
+        instructions: supportsInstructions ? instructions : "",
+        optimize_instructions: supportsInstructions && Boolean(instructions),
+      }
+      tts.send(JSON.stringify({ event_id: eventId("tts_update"), type: "session.update", session: ttsSession }))
       resolvePromise()
     })
 
@@ -354,6 +351,49 @@ function eventId(prefix) {
 function readableError(error) {
   if (error instanceof Error) return error.message
   return String(error || "Unknown error")
+}
+
+function splitSpeechCue(rawText) {
+  let remaining = rawText.trim()
+  const cues = []
+  const cuePattern = /^\s*[（(]\s*([^（）()]{2,120})\s*[）)]\s*/
+
+  while (remaining) {
+    const match = remaining.match(cuePattern)
+    if (!match) break
+    const cue = String(match[1] || "").trim()
+    if (!cue || !looksLikeStyleCue(cue)) break
+    cues.push(cue)
+    remaining = remaining.slice(match[0].length).trimStart()
+  }
+
+  const speechText = remaining || rawText.trim()
+  const styleHint = cues.join("；")
+  return {
+    speechText,
+    instructions: styleHint ? `请按照以下表演语气朗读，但不要读出括号或提示词本身：${styleHint}` : "",
+  }
+}
+
+function looksLikeStyleCue(text) {
+  return [
+    "语气",
+    "口吻",
+    "语速",
+    "音调",
+    "声调",
+    "情绪",
+    "情感",
+    "严肃",
+    "急切",
+    "威胁",
+    "恐吓",
+    "温柔",
+    "机械",
+    "不耐烦",
+    "压迫",
+    "冷静",
+  ].some((keyword) => text.includes(keyword))
 }
 
 function readSecret(name, b64Name) {

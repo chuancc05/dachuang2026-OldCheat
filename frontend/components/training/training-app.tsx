@@ -14,6 +14,7 @@ import {
 } from "@/components/training/voice-call-panel"
 import { Button } from "@/components/ui/button"
 import { evaluateReply, type Scenario } from "@/lib/scenarios"
+import { splitSpeechCue } from "@/lib/speech-text"
 import { RealtimeVoiceClient } from "@/lib/voice/realtime-voice-client"
 import { ShieldHalf, Play, RotateCcw, HelpCircle, PhoneCall } from "lucide-react"
 
@@ -405,7 +406,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
 
   const speakScammerLine = useCallback(
     (line: string) => {
-      const text = line.trim()
+      const text = splitSpeechCue(line).speechText.trim()
       if (!text) return
 
       recognitionRef.current?.abort()

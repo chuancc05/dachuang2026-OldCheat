@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react"
 import type { Scenario } from "@/lib/scenarios"
+import { splitSpeechCue } from "@/lib/speech-text"
 import { cn } from "@/lib/utils"
 import { Phone, MessageCircle, ShieldAlert, PhoneOff, Sparkles } from "lucide-react"
 
@@ -137,6 +138,7 @@ export function SimulationStage({
             )
           }
           const mine = m.sender === "user"
+          const displayText = m.sender === "scammer" ? splitSpeechCue(m.text).speechText : m.text
           return (
             <div key={m.id} className={cn("flex flex-col gap-1", mine ? "items-end" : "items-start")}>
               <div
@@ -147,7 +149,7 @@ export function SimulationStage({
                     : "rounded-bl-md bg-card text-card-foreground ring-1 ring-border",
                 )}
               >
-                {m.text}
+                {displayText}
               </div>
               {m.trigger && !mine && (
                 <span className="flex items-center gap-1 text-[11px] font-medium text-danger">
