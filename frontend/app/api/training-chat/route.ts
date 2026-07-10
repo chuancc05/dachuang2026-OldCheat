@@ -89,6 +89,56 @@ function buildCoach(trigger: string): string {
   return `识别到“${trigger}”相关话术。先稳住节奏，不透露个人信息，不点击链接，不转账。`
 }
 
+function fixedPersonaName(scenario: Scenario): string {
+  const persona = scenario.persona || ""
+  const afterDot = persona.includes("·") ? persona.split("·").pop()?.trim() ?? "" : ""
+  const afterQuote = persona.match(/」\s*(.+)$/u)?.[1]?.trim() ?? ""
+  const candidates = [afterDot, afterQuote].filter(Boolean)
+  return candidates.find((name) => !["来电", "工作人员", "官方客服", "退款专员", "风控专员", "紧急威胁"].includes(name)) ?? ""
+}
+
+function buildIdentityRules(scenario: Scenario): string[] {
+  const fixedName = fixedPersonaName(scenario)
+  const rules = [
+    `Fixed caller/persona shown to the trainee: ${scenario.persona}.`,
+    "Keep identity consistent across every turn. Do not invent a different caller name, job title, relative, or organization.",
+  ]
+  if (fixedName) {
+    rules.push(`If you introduce yourself or are asked who you are, use exactly this displayed name/title: ${fixedName}.`)
+    rules.push("Do not rename yourself to 小王、小李、小张、小赵、小陈、李华、王强 or any other new name.")
+  }
+  if (scenario.persona.includes("女儿")) {
+    rules.push("This family impersonation role is a daughter. Do not call yourself 儿子 or 小军; use 女儿/小雪 if needed.")
+  }
+  if (scenario.persona.includes("儿子")) {
+    rules.push("This family impersonation role is a son. Do not call yourself 女儿.")
+  }
+  return rules
+}
+
+function normalizeAiIdentity(line: string, scenario: Scenario): string {
+  let normalized = line
+  const fixedName = fixedPersonaName(scenario)
+  const introArea = normalized.slice(0, 70)
+  const looksLikeSelfIntro = /(我是|我叫|这里是|这边是|来自|自称)/u.test(introArea)
+  const alternateNames = ["小王", "小李", "小张", "小赵", "小陈", "李华", "王强", "小军"]
+
+  if (fixedName && looksLikeSelfIntro) {
+    for (const name of alternateNames) {
+      if (name !== fixedName) normalized = normalized.replaceAll(name, fixedName)
+    }
+  }
+
+  if (scenario.persona.includes("女儿")) {
+    normalized = normalized.replaceAll("我是你儿子", "我是你女儿")
+    normalized = normalized.replaceAll("你儿子", "你女儿")
+    normalized = normalized.replaceAll("儿子", "女儿")
+    normalized = normalized.replaceAll("小军", fixedName || "小雪")
+  }
+
+  return normalized
+}
+
 function fallbackTurn(scenario: Scenario, turnIndex: number): ScriptTurn {
   const fallback = scenario.script[turnIndex % Math.max(scenario.script.length, 1)]
   if (fallback) return fallback
@@ -144,6 +194,8 @@ function buildSystemPrompt(scenario: Scenario, ragContext?: RagContext): string 
     "6. If the plot needs payment, links, accounts, or codes, use clearly fictional placeholders such as mock account, mock app, mock link, or mock code.",
     "7. Do not provide real executable fraud instructions, real links, real accounts, or real contact information.",
     "8. Treat retrieved references as style and risk-pattern examples only. Do not copy full sample text verbatim.",
+    "Identity consistency rules:",
+    ...buildIdentityRules(scenario),
   ].join("\n")
 }
 
@@ -288,9 +340,10 @@ export async function POST(request: NextRequest) {
 
   try {
     const result = await generateAiLine(scenario, messages, userText.trim(), ragContext)
-    const trigger = pickTrigger(scenario, result.line, turnIndex)
+    const line = normalizeAiIdentity(result.line, scenario)
+    const trigger = pickTrigger(scenario, line, turnIndex)
     return NextResponse.json({
-      line: result.line,
+      line,
       trigger,
       riskDelta: Math.min(4.5, 1.8 + turnIndex * 0.35),
       coach: buildCoach(trigger),

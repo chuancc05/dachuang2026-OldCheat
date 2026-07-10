@@ -94,7 +94,7 @@ async function handleClientEvent(client, session, event) {
     case "tts.speak":
       if (typeof event.text === "string" && event.text.trim()) {
         const speech = splitSpeechCue(event.text.trim())
-        await speakText(client, session, speech.speechText, speech.instructions)
+        await speakText(client, session, speech.speechText, speech.instructions, event.voice)
       }
       break
     case "tts.stop":
@@ -186,10 +186,11 @@ function startAsr(client, session) {
   })
 }
 
-function speakText(client, session, text, instructions = "") {
+function speakText(client, session, text, instructions = "", requestedVoice = "") {
   closeSocket(session.tts)
   session.ttsPendingText = text
   const supportsInstructions = /instruct/i.test(TTS_URL)
+  const voice = resolveTtsVoice(requestedVoice)
 
   return new Promise((resolvePromise) => {
     const tts = new WebSocket(TTS_URL, { headers: upstreamHeaders() })
@@ -200,7 +201,7 @@ function speakText(client, session, text, instructions = "") {
     const sendText = () => {
       if (sentText || tts.readyState !== WebSocket.OPEN) return
       sentText = true
-      sendClient(client, { type: "tts.started", text })
+      sendClient(client, { type: "tts.started", text, voice })
       tts.send(JSON.stringify({ event_id: eventId("tts_append"), type: "input_text_buffer.append", text }))
       tts.send(JSON.stringify({ event_id: eventId("tts_commit"), type: "input_text_buffer.commit" }))
     }
@@ -216,7 +217,7 @@ function speakText(client, session, text, instructions = "") {
 
     tts.on("open", () => {
       const ttsSession = {
-        voice: TTS_VOICE,
+        voice,
         mode: "server_commit",
         language_type: "Chinese",
         response_format: "pcm",
@@ -262,6 +263,13 @@ function speakText(client, session, text, instructions = "") {
       if (session.tts === tts) session.tts = null
     })
   })
+}
+
+function resolveTtsVoice(value) {
+  if (typeof value === "string" && /^[A-Za-z][A-Za-z0-9 _-]{0,48}$/.test(value.trim())) {
+    return value.trim()
+  }
+  return TTS_VOICE
 }
 
 function mapAsrEvent(event, lastPartial) {

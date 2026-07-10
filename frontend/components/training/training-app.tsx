@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button"
 import { evaluateReply, type Scenario } from "@/lib/scenarios"
 import { splitSpeechCue } from "@/lib/speech-text"
 import { RealtimeVoiceClient } from "@/lib/voice/realtime-voice-client"
+import { getScenarioVoice } from "@/lib/voice/scenario-voices"
 import { ShieldHalf, Play, RotateCcw, HelpCircle, PhoneCall } from "lucide-react"
 
 const DEFAULT_ADVICE = "保持核实身份、拒绝验证码、拒绝转账的习惯。遇到催促和恐吓，先停下，再核实。"
@@ -549,12 +550,13 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     if (!scenario || !started || finished) return
     const line = lastSpokenLineRef.current || lastScammerText(messages, scenario, scammerShown)
     if (!line.trim()) return
+    const scenarioVoice = getScenarioVoice(scenario)
     setVoicePanelOpen(true)
     voiceLoopRef.current = true
     if (realtimeVoiceRef.current && realtimeClientRef.current) {
       setVoiceProvider("dashscope")
       lastSpokenLineRef.current = line
-      void realtimeClientRef.current.speak(line)
+      void realtimeClientRef.current.speak(line, scenarioVoice.voice)
       return
     }
     speakScammerLine(line)
@@ -629,6 +631,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
 
   const handleStartRealtimeVoice = useCallback(async () => {
     if (!scenario) return false
+    const scenarioVoice = getScenarioVoice(scenario)
     if (typing) {
       setVoicePanelOpen(true)
       setVoiceStatus("paused")
@@ -665,7 +668,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
             if (!realtimeVoiceRef.current || finishedRef.current) return
             if (nextLine) {
               lastSpokenLineRef.current = nextLine
-              await client.speak(nextLine)
+              await client.speak(nextLine, scenarioVoice.voice)
             } else {
               voiceLoopRef.current = false
               realtimeVoiceRef.current = false
@@ -738,13 +741,13 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
         setLastAiSource("fallback")
         if (firstTurn.trigger) setTriggers((items) => [...items, firstTurn.trigger as string])
         lastSpokenLineRef.current = firstTurn.line
-        await client.speak(firstTurn.line)
+        await client.speak(firstTurn.line, scenarioVoice.voice)
         return true
       }
 
       const line = lastScammerText(messages, scenario, scammerShown)
       lastSpokenLineRef.current = line
-      await client.speak(line)
+      await client.speak(line, scenarioVoice.voice)
       return true
     } catch (error) {
       console.warn("Realtime voice gateway unavailable, falling back to browser voice", error)

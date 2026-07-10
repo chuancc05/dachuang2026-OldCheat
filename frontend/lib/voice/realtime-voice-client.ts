@@ -109,13 +109,13 @@ export class RealtimeVoiceClient {
     }
   }
 
-  async speak(text: string) {
+  async speak(text: string, voice?: string) {
     const trimmed = text.trim()
     if (!trimmed) return
     await this.connect()
     this.stopListening(false)
     this.stopPlayback()
-    this.send({ type: "tts.speak", text: trimmed })
+    this.send({ type: "tts.speak", text: trimmed, voice })
   }
 
   stopPlayback() {

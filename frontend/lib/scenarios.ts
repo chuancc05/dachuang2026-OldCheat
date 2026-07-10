@@ -210,9 +210,9 @@ export const SCENARIOS: Scenario[] = [
     title: "冒充子女",
     difficulty: "高",
     channel: "wechat",
-    persona: "「儿子」小军",
+    persona: "「女儿」小雪",
     avatar: "亲",
-    source: "陌生微信 · 头像盗用你儿子照片",
+    source: "陌生微信 · 头像盗用你女儿照片",
     tagline: "盗用子女身份，谎称手机坏了急需用钱交学费/押金。",
     method: "冒充亲人 + 制造急事 + 阻止核实",
     script: [
@@ -229,7 +229,7 @@ export const SCENARIOS: Scenario[] = [
         coach: "“别打电话、直接转账”是最强警报。越是不让核实，越要坚持当面或视频确认。",
       },
       {
-        line: "妈你怎么还不信我呀，我是你儿子啊！再晚就来不及了，你是不是不心疼我了？先转5000也行，剩下的我想办法。",
+        line: "妈你怎么还不信我呀，我是你女儿啊！再晚就来不及了，你是不是不心疼我了？先转5000也行，剩下的我想办法。",
         trigger: "情感绑架",
         riskDelta: 4,
         coach: "用“不爱我了”施压是冒充者惯用手段。稳住情绪，核实身份前一分钱都不转。",
