@@ -9,6 +9,7 @@
         "lint": "eslint .",
     "rag:build": "node scripts/build-rag-index.mjs",
     "scenarios:check": "node scripts/check-scenario-quality.mjs",
+    "test:smoke": "node scripts/run-training-smoke-tests.mjs",
     "voice:gateway": "node voice-gateway/server.mjs",
         "audio:cues": "node scripts/generate-audio-cues.mjs"
     },

@@ -10,11 +10,10 @@ import { ReportDialog, type ReportEvent, type ReportEvaluation } from "@/compone
 import { MobileTrainingFlow } from "@/components/training/mobile-training-flow"
 import {
   VoiceCallPanel,
-  type VoiceCallStatus,
-  type VoiceProvider,
-  type VoiceTranscript,
 } from "@/components/training/voice-call-panel"
 import { Button } from "@/components/ui/button"
+import { DEFAULT_ADVICE, type AiSource, useTrainingSession } from "@/hooks/use-training-session"
+import { getSpeechRecognitionConstructor, useVoiceTraining } from "@/hooks/use-voice-training"
 import { evaluateReply, type Scenario } from "@/lib/scenarios"
 import { splitSpeechCue } from "@/lib/speech-text"
 import { RealtimeVoiceClient } from "@/lib/voice/realtime-voice-client"
@@ -27,45 +26,13 @@ import {
 import { getScenarioVoice } from "@/lib/voice/scenario-voices"
 import { ShieldHalf, Play, RotateCcw, HelpCircle, PhoneCall } from "lucide-react"
 
-const DEFAULT_ADVICE = "保持核实身份、拒绝验证码、拒绝转账的习惯。遇到催促和恐吓，先停下，再核实。"
-
 const QUICK_REPLIES = [
   "这听起来像诈骗，我要挂断了",
   "我要先联系我的子女核实",
   "我不会转账，也不会给验证码",
 ]
 
-type AiSource = "idle" | "deepseek" | "ollama" | "fallback"
 type TrainingReply = AudioTurn
-
-type BrowserSpeechRecognitionEvent = {
-  resultIndex: number
-  results: {
-    length: number
-    [index: number]: {
-      isFinal?: boolean
-      [index: number]: {
-        transcript: string
-        confidence?: number
-      }
-    }
-  }
-}
-
-type BrowserSpeechRecognition = {
-  lang: string
-  continuous: boolean
-  interimResults: boolean
-  maxAlternatives: number
-  onresult: ((event: BrowserSpeechRecognitionEvent) => void) | null
-  onerror: ((event: { error?: string }) => void) | null
-  onend: (() => void) | null
-  start: () => void
-  stop: () => void
-  abort: () => void
-}
-
-type BrowserSpeechRecognitionConstructor = new () => BrowserSpeechRecognition
 
 const AI_SOURCE_LABELS: Record<AiSource, string> = {
   idle: "当前模型：待启动",
@@ -109,15 +76,6 @@ function consumeOneShotAudioCues(turn: TrainingReply, consumedCueIds: Set<AudioC
     return true
   })
   return cues.length === turn.cues.length ? turn : { ...turn, cues }
-}
-
-function getSpeechRecognitionConstructor(): BrowserSpeechRecognitionConstructor | null {
-  if (typeof window === "undefined") return null
-  const browserWindow = window as typeof window & {
-    SpeechRecognition?: BrowserSpeechRecognitionConstructor
-    webkitSpeechRecognition?: BrowserSpeechRecognitionConstructor
-  }
-  return browserWindow.SpeechRecognition ?? browserWindow.webkitSpeechRecognition ?? null
 }
 
 function formatDuration(s: number) {
@@ -213,133 +171,93 @@ const nextId = () => `m-${idc++}`
 
 export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
   const isMobileViewport = useMobileViewport()
-  const [scenario, setScenario] = useState<Scenario | null>(scenarios[0] ?? null)
-  const [started, setStarted] = useState(false)
-  const [finished, setFinished] = useState(false)
-  const [messages, setMessages] = useState<Message[]>([])
-  const [typing, setTyping] = useState(false)
-  const [scammerShown, setScammerShown] = useState(0)
-
-  const [risk, setRisk] = useState(0)
-  const [peakRisk, setPeakRisk] = useState(0)
-  const [triggers, setTriggers] = useState<string[]>([])
-  const [advice, setAdvice] = useState(DEFAULT_ADVICE)
-  const [goodMoves, setGoodMoves] = useState(0)
-  const [riskyMoves, setRiskyMoves] = useState(0)
-  const [duration, setDuration] = useState(0)
-  const [reportOpen, setReportOpen] = useState(false)
-  const [coreCompleteNotified, setCoreCompleteNotified] = useState(false)
-  const [lastAiSource, setLastAiSource] = useState<AiSource>("idle")
-  const [ragDebugEnabled, setRagDebugEnabled] = useState(false)
-  const [lastRagDebug, setLastRagDebug] = useState<RagDebugInfo | null>(null)
-  const [reportEvents, setReportEvents] = useState<ReportEvent[]>([])
-  const [voicePanelOpen, setVoicePanelOpen] = useState(false)
-  const [voiceStatus, setVoiceStatus] = useState<VoiceCallStatus>("idle")
-  const [voiceProvider, setVoiceProvider] = useState<VoiceProvider>("unavailable")
-  const [voiceTranscript, setVoiceTranscript] = useState<VoiceTranscript | null>(null)
-  const [voiceError, setVoiceError] = useState("")
-  const [voiceMuted, setVoiceMuted] = useState(false)
-
-  useEffect(() => {
-    setRagDebugEnabled(new URLSearchParams(window.location.search).get("ragDebug") === "1")
-  }, [])
+  const session = useTrainingSession(scenarios[0] ?? null)
+  const {
+    scenario,
+    started,
+    finished,
+    messages,
+    typing,
+    scammerShown,
+    risk,
+    peakRisk,
+    triggers,
+    advice,
+    goodMoves,
+    riskyMoves,
+    duration,
+    reportOpen,
+    coreCompleteNotified,
+    lastAiSource,
+    ragDebugEnabled,
+    lastRagDebug,
+    reportEvents,
+    defenseScore,
+    setStarted,
+    setFinished,
+    setMessages,
+    setTyping,
+    setScammerShown,
+    setTriggers,
+    setAdvice,
+    setGoodMoves,
+    setRiskyMoves,
+    setReportOpen,
+    setCoreCompleteNotified,
+    setLastAiSource,
+    setLastRagDebug,
+    setReportEvents,
+    bumpRisk,
+    resetSession: resetSessionState,
+  } = session
+  const voice = useVoiceTraining()
+  const {
+    voicePanelOpen,
+    voiceStatus,
+    voiceProvider,
+    voiceTranscript,
+    voiceError,
+    voiceMuted,
+    voiceActive,
+    recognitionRef,
+    realtimeClientRef,
+    voiceLoopRef,
+    realtimeVoiceRef,
+    realtimeSubmittingRef,
+    finishedRef,
+    transcriptRef,
+    transcriptConfidenceRef,
+    lastSpokenLineRef,
+    lastSpokenTurnRef,
+    consumedAudioCueIdsRef,
+    handleSendRef,
+    startVoiceListeningRef,
+    setVoicePanelOpen,
+    setVoiceStatus,
+    setVoiceProvider,
+    setVoiceTranscript,
+    setVoiceError,
+    setVoiceMuted,
+    stopBrowserVoice,
+    stopRealtimeVoice,
+    resetVoiceTraining,
+    finishVoiceTraining,
+  } = voice
 
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const recognitionRef = useRef<BrowserSpeechRecognition | null>(null)
-  const realtimeClientRef = useRef<RealtimeVoiceClient | null>(null)
-  const voiceLoopRef = useRef(false)
-  const realtimeVoiceRef = useRef(false)
-  const realtimeSubmittingRef = useRef(false)
-  const finishedRef = useRef(false)
-  const transcriptRef = useRef("")
-  const transcriptConfidenceRef = useRef<number | undefined>(undefined)
-  const lastSpokenLineRef = useRef("")
-  const lastSpokenTurnRef = useRef<TrainingReply | null>(null)
-  const consumedAudioCueIdsRef = useRef<Set<AudioCue["id"]>>(new Set())
-  const handleSendRef = useRef<(text: string) => Promise<TrainingReply | null>>(async () => null)
-  const startVoiceListeningRef = useRef<() => void>(() => {})
-
-  const stopBrowserVoice = useCallback(() => {
-    recognitionRef.current?.abort()
-    recognitionRef.current = null
-    if (typeof window !== "undefined" && "speechSynthesis" in window) {
-      window.speechSynthesis.cancel()
-    }
-  }, [])
-
-  const stopRealtimeVoice = useCallback(() => {
-    realtimeVoiceRef.current = false
-    realtimeClientRef.current?.close()
-    realtimeClientRef.current = null
-  }, [])
-
-  useEffect(() => {
-    if (!started || finished) return
-    const timer = setInterval(() => setDuration((value) => value + 1), 1000)
-    return () => clearInterval(timer)
-  }, [started, finished])
 
   useEffect(() => {
     finishedRef.current = finished
     if (finished) {
-      voiceLoopRef.current = false
-      stopRealtimeVoice()
-      stopBrowserVoice()
-      setVoiceStatus("finished")
+      finishVoiceTraining()
     }
-  }, [finished, stopBrowserVoice, stopRealtimeVoice])
-
-  useEffect(
-    () => () => {
-      if (timeoutRef.current) clearTimeout(timeoutRef.current)
-      voiceLoopRef.current = false
-      stopRealtimeVoice()
-      stopBrowserVoice()
-    },
-    [stopBrowserVoice, stopRealtimeVoice],
-  )
-
-  const bumpRisk = useCallback((delta: number) => {
-    setRisk((current) => {
-      const next = Math.max(0, Math.min(10, current + delta))
-      setPeakRisk((peak) => Math.max(peak, next))
-      return next
-    })
-  }, [])
+  }, [finishVoiceTraining, finished, finishedRef])
 
   const resetSession = useCallback((nextScenario: Scenario | null) => {
     if (timeoutRef.current) clearTimeout(timeoutRef.current)
-    voiceLoopRef.current = false
-    stopRealtimeVoice()
-    stopBrowserVoice()
-    setScenario(nextScenario)
-    setStarted(false)
-    setFinished(false)
-    setMessages([])
-    setTyping(false)
-    setScammerShown(0)
-    setRisk(0)
-    setPeakRisk(0)
-    setTriggers([])
-    setAdvice(DEFAULT_ADVICE)
-    setGoodMoves(0)
-    setRiskyMoves(0)
-    setDuration(0)
-    setReportOpen(false)
-    setCoreCompleteNotified(false)
-    setLastAiSource("idle")
-    setLastRagDebug(null)
-    setReportEvents([])
-    setVoicePanelOpen(false)
-    setVoiceStatus("idle")
-    setVoiceProvider("unavailable")
-    setVoiceTranscript(null)
-    setVoiceError("")
-    setVoiceMuted(false)
-    lastSpokenLineRef.current = ""
-    lastSpokenTurnRef.current = null
-    consumedAudioCueIdsRef.current.clear()
-  }, [stopBrowserVoice, stopRealtimeVoice])
+    resetSessionState(nextScenario)
+    resetVoiceTraining()
+  }, [resetSessionState, resetVoiceTraining])
 
   const revealScammerLine = useCallback(
     (index: number, activeScenario: Scenario) => {
@@ -376,15 +294,10 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     revealScammerLine(0, scenario)
   }, [scenario, revealScammerLine])
 
-  const defenseScore = Math.round(
-    Math.max(0, Math.min(100, 100 - peakRisk * 6 - riskyMoves * 12 + goodMoves * 6)),
-  )
   const totalTurns = scenario ? scenario.script.length : 0
   const progress = totalTurns ? Math.min(scammerShown, totalTurns) : 0
   const inputDisabled = !started || finished || typing
   const scammerSpeaking = voicePanelOpen && voiceStatus === "speaking-scammer"
-  const voiceActive =
-    voicePanelOpen && !["idle", "paused", "finished", "error"].includes(voiceStatus)
   const voiceDurationLabel = started ? formatDuration(duration) : "00:00"
 
   const handleSend = useCallback(
