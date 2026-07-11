@@ -136,6 +136,8 @@ export function VoiceCallPanel({
 
   const copy = STATUS_COPY[finished ? "finished" : status]
   const canReplay = started && !finished && status !== "speaking-scammer" && status !== "thinking"
+  const isScammerSpeaking = started && !finished && status === "speaking-scammer"
+  const startLabel = status === "error" ? "重新开启麦克风" : status === "paused" ? "继续语音训练" : "开始语音"
 
   return (
     <section className="border-b bg-card px-4 py-4 sm:px-6">
@@ -172,6 +174,12 @@ export function VoiceCallPanel({
             <p className="mt-1 text-sm leading-relaxed text-muted-foreground text-pretty">
               {error || copy.detail}
             </p>
+            {isScammerSpeaking && (
+              <p className="mt-2 flex items-center gap-1.5 text-sm font-semibold text-primary" role="status">
+                <Volume2 className="size-4" />
+                正在播放对方话术，回复输入已暂时锁定。
+              </p>
+            )}
             {scenario && (
               <p className="mt-2 truncate text-sm font-medium">
                 {scenario.title} · {scenario.persona}
@@ -189,7 +197,7 @@ export function VoiceCallPanel({
           {!started || status === "idle" || status === "paused" || status === "error" ? (
             <Button size="lg" onClick={onStart} className="h-12 text-base">
               <Play className="size-5" />
-              开始语音
+              {startLabel}
             </Button>
           ) : (
             <Button size="lg" variant="secondary" onClick={onStopVoice} className="h-12 text-base">

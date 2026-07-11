@@ -382,6 +382,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
   const totalTurns = scenario ? scenario.script.length : 0
   const progress = totalTurns ? Math.min(scammerShown, totalTurns) : 0
   const inputDisabled = !started || finished || typing
+  const scammerSpeaking = voicePanelOpen && voiceStatus === "speaking-scammer"
   const voiceActive =
     voicePanelOpen && !["idle", "paused", "finished", "error"].includes(voiceStatus)
   const voiceDurationLabel = started ? formatDuration(duration) : "00:00"
@@ -611,7 +612,11 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
       recognitionRef.current = null
       voiceLoopRef.current = false
       setVoiceStatus("error")
-      setVoiceError(event.error === "not-allowed" ? "麦克风权限被拒绝，请允许麦克风后再试。" : "没听清，请再说一遍。")
+      setVoiceError(
+          event.error === "not-allowed"
+            ? "麦克风权限未开启。请点击“重新开启麦克风”，在浏览器弹窗中选择允许。"
+            : "没有听清。请点击“重新开启麦克风”，靠近麦克风后再说一次；也可以改用文字输入。",
+        )
     }
 
     recognition.onend = () => {
@@ -623,7 +628,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
       if (!text) {
         voiceLoopRef.current = false
         setVoiceStatus("error")
-        setVoiceError("没听清，请再说一遍。")
+        setVoiceError("没有听清。请点击“重新开启麦克风”，靠近麦克风后再说一次；也可以改用文字输入。")
         return
       }
 
@@ -725,7 +730,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     } catch (error) {
       voiceLoopRef.current = false
       setVoiceStatus("error")
-      setVoiceError("麦克风权限被拒绝，请允许麦克风后再试。")
+      setVoiceError("麦克风权限未开启。请点击“重新开启麦克风”，在浏览器弹窗中选择允许。")
       console.warn("Microphone permission was not granted", error)
       return
     }
@@ -832,7 +837,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
           voiceLoopRef.current = false
           realtimeVoiceRef.current = false
           setVoiceStatus("error")
-          setVoiceError("实时语音识别启动失败，已保留文字训练入口。")
+          setVoiceError("实时语音识别启动失败。请点击“重新开启麦克风”再试，也可以改用文字输入。")
           console.warn("Realtime ASR failed", error)
         })
       },
@@ -843,7 +848,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
         voiceLoopRef.current = false
         realtimeVoiceRef.current = false
         setVoiceStatus("error")
-        setVoiceError("阿里云实时语音暂时不可用，已保留文字训练入口，也可以再次点击改用浏览器语音。")
+        setVoiceError("阿里云实时语音暂时不可用。请点击“重新开启麦克风”再试，也可以改用文字输入。")
       },
     })
 
@@ -1085,6 +1090,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
           ) : scenario ? (
             <ReplyBar
               disabled={inputDisabled}
+              inputLocked={scammerSpeaking}
               finished={finished}
               onSend={handleSend}
               onHelp={handleHelp}

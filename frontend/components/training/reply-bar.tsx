@@ -3,7 +3,7 @@
 import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
-import { Send, Mic, Square, LifeBuoy, PhoneOff } from "lucide-react"
+import { Send, Mic, Square, LifeBuoy, PhoneOff, Volume2 } from "lucide-react"
 
 interface ReplyBarProps {
   disabled: boolean
@@ -13,6 +13,7 @@ interface ReplyBarProps {
   onHangup: () => void
   onVoiceStart?: () => void
   voiceActive?: boolean
+  inputLocked?: boolean
   quickReplies: string[]
 }
 
@@ -24,13 +25,15 @@ export function ReplyBar({
   onHangup,
   onVoiceStart,
   voiceActive = false,
+  inputLocked = false,
   quickReplies,
 }: ReplyBarProps) {
   const [value, setValue] = useState("")
+  const replyDisabled = disabled || inputLocked
 
   function submit() {
     const text = value.trim()
-    if (!text || disabled) return
+    if (!text || replyDisabled) return
     onSend(text)
     setValue("")
   }
@@ -44,8 +47,8 @@ export function ReplyBar({
           {quickReplies.map((q) => (
             <button
               key={q}
-              onClick={() => !disabled && onSend(q)}
-              disabled={disabled}
+              onClick={() => !replyDisabled && onSend(q)}
+              disabled={replyDisabled}
               className="rounded-full border border-primary/30 bg-primary/5 px-3 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/10 disabled:opacity-50"
             >
               {q}
@@ -73,7 +76,7 @@ export function ReplyBar({
           <textarea
             rows={1}
             value={value}
-            disabled={disabled}
+            disabled={replyDisabled}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
@@ -83,17 +86,30 @@ export function ReplyBar({
               }
             }}
             placeholder={
-              finished ? "本场对话已结束，可切换新场景" : voiceActive ? "语音训练进行中，也可以在这里手动输入..." : "输入你的回复，练习如何应对..."
+              finished
+                ? "本场对话已结束，可切换新场景"
+                : inputLocked
+                  ? "对方正在说话，请先听完..."
+                  : voiceActive
+                    ? "语音训练进行中，也可以在这里手动输入..."
+                    : "输入你的回复，练习如何应对..."
             }
             className="max-h-32 flex-1 resize-none bg-transparent px-3 py-3 text-[15px] outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed"
           />
         </div>
 
-        <Button onClick={submit} disabled={disabled || !value.trim()} className="h-11 shrink-0 px-4">
+        <Button onClick={submit} disabled={replyDisabled || !value.trim()} className="h-11 shrink-0 px-4">
           <Send className="size-4" />
           <span className="hidden sm:inline">发送</span>
         </Button>
       </div>
+
+      {inputLocked && !finished && (
+        <p className="mt-2 flex items-center gap-1.5 text-xs font-medium text-primary" role="status">
+          <Volume2 className="size-3.5" />
+          对方正在说话，请先听完；需要退出时可直接挂断。
+        </p>
+      )}
 
       {/* action row */}
       <div className="mt-3 flex items-center justify-between gap-2">
@@ -104,7 +120,7 @@ export function ReplyBar({
           <Button
             variant="outline"
             onClick={onHelp}
-            disabled={finished && disabled}
+            disabled={finished}
             className="flex-1 border-warning/50 text-warning-foreground hover:bg-warning/10 sm:flex-none"
           >
             <LifeBuoy className="size-4" />
@@ -113,7 +129,7 @@ export function ReplyBar({
           <Button
             variant="outline"
             onClick={onHangup}
-            disabled={disabled}
+            disabled={finished}
             className="flex-1 border-danger/50 text-danger hover:bg-danger/10 sm:flex-none"
           >
             <PhoneOff className="size-4" />

@@ -73,7 +73,7 @@ const VOICE_STATUS_COPY: Record<VoiceCallStatus, { title: string; detail: string
   thinking: { title: "正在思考", detail: "正在分析这句话里的风险。" },
   paused: { title: "语音已暂停", detail: "可以重新开启麦克风，或改用文字训练。" },
   finished: { title: "训练完成", detail: "本次训练已经保存，可以查看结果。" },
-  error: { title: "没有听清", detail: "请重新开启麦克风，或改用文字训练。" },
+  error: { title: "没有听清", detail: "点击重新开启麦克风，靠近手机再说一次；也可以改用文字训练。" },
 }
 
 interface MobileTrainingFlowProps {
