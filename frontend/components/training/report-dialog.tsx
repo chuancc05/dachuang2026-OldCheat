@@ -172,11 +172,11 @@ export function ReportDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-foreground/40 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative z-10 max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-3xl border bg-card p-6 shadow-xl">
+      <div className="relative z-10 max-h-[92dvh] w-full max-w-3xl overflow-y-auto rounded-3xl border bg-card p-4 shadow-xl sm:p-6">
         <div className="flex items-start justify-between gap-4">
           <div>
             <p className="font-mono text-xs text-muted-foreground">训练报告 · {scenario.code}</p>
-            <h2 className="text-2xl font-bold leading-tight">{scenario.title} · 训练复盘</h2>
+            <h2 className="text-xl font-bold leading-tight sm:text-2xl">{scenario.title} · 训练复盘</h2>
             <p className="mt-1 text-sm text-muted-foreground">规则指标负责评分，DeepSeek 负责生成自然语言总结。</p>
           </div>
           <button

@@ -6,6 +6,7 @@ import { SimulationStage, type Message } from "@/components/training/simulation-
 import { CoachPanel } from "@/components/training/coach-panel"
 import { ReplyBar } from "@/components/training/reply-bar"
 import { ReportDialog, type ReportEvent, type ReportEvaluation } from "@/components/training/report-dialog"
+import { MobileTrainingFlow } from "@/components/training/mobile-training-flow"
 import {
   VoiceCallPanel,
   type VoiceCallStatus,
@@ -124,6 +125,20 @@ function formatDuration(s: number) {
   return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`
 }
 
+function useMobileViewport() {
+  const [isMobile, setIsMobile] = useState(false)
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(max-width: 767px)")
+    const updateViewport = () => setIsMobile(mediaQuery.matches)
+    updateViewport()
+    mediaQuery.addEventListener("change", updateViewport)
+    return () => mediaQuery.removeEventListener("change", updateViewport)
+  }, [])
+
+  return isMobile
+}
+
 function summarizeUserMove(hitDefensive: boolean, hitRisky: boolean): { evaluation: ReportEvaluation; reason: string } {
   if (hitDefensive && hitRisky) {
     return {
@@ -160,6 +175,7 @@ let idc = 0
 const nextId = () => `m-${idc++}`
 
 export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
+  const isMobileViewport = useMobileViewport()
   const [scenario, setScenario] = useState<Scenario | null>(scenarios[0] ?? null)
   const [started, setStarted] = useState(false)
   const [finished, setFinished] = useState(false)
@@ -877,6 +893,55 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     setFinished(true)
     setAdvice("挂断就是最好的反诈。挂断、不回拨陌生号码、和家人确认，你已经赢了这一局。")
   }, [scenario, started, finished, bumpRisk, stopBrowserVoice, stopRealtimeVoice])
+
+  if (isMobileViewport) {
+    return (
+      <>
+        <MobileTrainingFlow
+          scenarios={scenarios}
+          scenario={scenario}
+          activeScenarioId={scenario?.id ?? null}
+          started={started}
+          finished={finished}
+          messages={messages}
+          typing={typing}
+          durationLabel={voiceDurationLabel}
+          risk={risk}
+          defenseScore={defenseScore}
+          goodMoves={goodMoves}
+          riskyMoves={riskyMoves}
+          advice={advice}
+          voiceStatus={voiceStatus}
+          voiceProvider={voiceProvider}
+          voiceTranscript={voiceTranscript}
+          voiceError={voiceError}
+          voiceActive={voiceActive}
+          onSelectScenario={handleSelect}
+          onStartVoice={handleStartVoice}
+          onStartText={handleStart}
+          onSendText={handleSend}
+          onReplay={handleReplayVoice}
+          onHelp={handleHelp}
+          onHangup={handleHangup}
+          onStopVoice={handlePauseVoice}
+          onOpenReport={() => setReportOpen(true)}
+          onRestart={() => resetSession(scenario)}
+        />
+        <ReportDialog
+          open={reportOpen}
+          onClose={() => setReportOpen(false)}
+          scenario={scenario}
+          defenseScore={defenseScore}
+          goodMoves={goodMoves}
+          riskyMoves={riskyMoves}
+          peakRisk={peakRisk}
+          triggers={triggers}
+          turns={scammerShown}
+          events={reportEvents}
+        />
+      </>
+    )
+  }
 
   return (
     <div className="flex h-dvh flex-col bg-background">
