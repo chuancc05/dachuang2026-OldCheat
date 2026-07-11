@@ -10,7 +10,9 @@ const frontendRoot = resolve(here, "..")
 loadLocalEnv(resolve(frontendRoot, ".env.local"))
 
 const PORT = Number(process.env.VOICE_GATEWAY_PORT || 8787)
+const HOST = process.env.VOICE_GATEWAY_HOST || "0.0.0.0"
 const API_KEY = readSecret("DASHSCOPE_API_KEY", "DASHSCOPE_API_KEY_B64")
+const ALLOWED_ORIGINS = parseOrigins(process.env.VOICE_ALLOWED_ORIGINS)
 const WORKSPACE_ID = process.env.DASHSCOPE_WORKSPACE_ID || process.env.DASHSCOPE_WORKSPACE || ""
 const ASR_URL =
   process.env.DASHSCOPE_ASR_WS_URL ||
@@ -28,6 +30,11 @@ if (!API_KEY) {
   process.exit(1)
 }
 
+if (process.env.NODE_ENV === "production" && ALLOWED_ORIGINS.length === 0) {
+  console.error("[voice-gateway] VOICE_ALLOWED_ORIGINS is required in production")
+  process.exit(1)
+}
+
 const server = createServer((req, res) => {
   if (req.url === "/health") {
     res.writeHead(200, { "content-type": "application/json" })
@@ -39,7 +46,18 @@ const server = createServer((req, res) => {
   res.end(JSON.stringify({ ok: false, error: "not_found" }))
 })
 
-const wss = new WebSocketServer({ server, path: "/voice" })
+const wss = new WebSocketServer({
+  server,
+  path: "/voice",
+  verifyClient: (info, done) => {
+    const origin = String(info.origin || info.req.headers.origin || "")
+    if (ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin)) {
+      done(true)
+      return
+    }
+    done(false, 403, "WebSocket origin is not allowed")
+  },
+})
 
 wss.on("connection", (client) => {
   const session = {
@@ -72,9 +90,10 @@ wss.on("connection", (client) => {
   client.on("error", () => closeSession(session))
 })
 
-server.listen(PORT, "127.0.0.1", () => {
-  console.log(`[voice-gateway] listening on ws://127.0.0.1:${PORT}/voice`)
-  console.log("[voice-gateway] health check: http://127.0.0.1:" + PORT + "/health")
+server.listen(PORT, HOST, () => {
+  console.log(`[voice-gateway] listening on ws://${HOST}:${PORT}/voice`)
+  console.log(`[voice-gateway] allowed origins: ${ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS.join(", ") : "development open"}`)
+  console.log(`[voice-gateway] health check: http://${HOST}:${PORT}/health`)
 })
 
 async function handleClientEvent(client, session, event) {
@@ -445,6 +464,13 @@ function readSecret(name, b64Name) {
     return Buffer.from(encoded.trim(), "base64").toString("utf8").trim()
   }
   return ""
+}
+
+function parseOrigins(value) {
+  return String(value || "")
+    .split(",")
+    .map((origin) => origin.trim().replace(/\/$/u, ""))
+    .filter((origin) => /^https?:\/\//iu.test(origin))
 }
 
 function loadLocalEnv(path) {

@@ -62,7 +62,7 @@ function aiProvider(): AiProvider {
 }
 
 function deepSeekApiKey(): string {
-  return envValue("DEEPSEEK_API_KEY") || envValueBase64("DEEPSEEK_API_KEY_B64") || envValueBase64("RAG_EMBED_BATCH_SIZE")
+  return envValue("DEEPSEEK_API_KEY") || envValueBase64("DEEPSEEK_API_KEY_B64")
 }
 
 function deepSeekBaseUrl(): string {

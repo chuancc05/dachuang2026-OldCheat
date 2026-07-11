@@ -107,4 +107,26 @@ check("RAG 配置异常时保留关键词检索兜底", () => {
   assert.match(rag, /catch \(error\)[\s\S]{0,1600}mode: "lexical"/u, "向量检索失败后未回退关键词检索")
 })
 
+check("实时语音网关具备生产来源限制和容器部署配置", () => {
+  const gateway = readText("voice-gateway/server.mjs")
+  const dockerfile = readText("voice-gateway/Dockerfile")
+  const compose = readText("voice-gateway/docker-compose.yml")
+  const caddyfile = readText("voice-gateway/Caddyfile")
+  assert.match(gateway, /VOICE_ALLOWED_ORIGINS/u, "语音网关缺少来源限制配置")
+  assert.match(gateway, /verifyClient/u, "语音网关缺少 WebSocket 来源校验")
+  assert.match(gateway, /VOICE_GATEWAY_HOST/u, "语音网关缺少生产监听地址配置")
+  assert.match(dockerfile, /FROM node:20-alpine/u, "语音网关缺少 Node 20 容器镜像")
+  assert.match(compose, /caddy/u, "语音网关缺少 TLS 反向代理服务")
+  assert.match(caddyfile, /reverse_proxy voice-gateway:8787/u, "Caddy 未转发到语音网关")
+})
+
+check("AI 与向量密钥只从专用秘密变量读取", () => {
+  const chatRoute = readText("app/api/training-chat/route.ts")
+  const rag = readText("lib/rag.ts")
+  assert.doesNotMatch(chatRoute, /envValueBase64\("RAG_EMBED_BATCH_SIZE"\)/u, "DeepSeek 密钥仍从批量大小变量读取")
+  assert.doesNotMatch(rag, /envValueBase64\("RAG_EMBED_DIMENSIONS"\)/u, "DashScope 密钥仍从向量维度变量读取")
+  assert.match(chatRoute, /DEEPSEEK_API_KEY_B64/u, "DeepSeek 缺少专用 Base64 Secret 支持")
+  assert.match(rag, /DASHSCOPE_API_KEY_B64/u, "DashScope 缺少专用 Base64 Secret 支持")
+})
+
 console.log("\n训练系统离线验收通过：场景、RAG、API 兜底和语音降级均已检查。")

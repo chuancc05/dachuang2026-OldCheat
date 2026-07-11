@@ -124,7 +124,7 @@ function ragEmbedDimensions(): number {
 }
 
 function dashScopeApiKey(): string {
-  return envValue("DASHSCOPE_API_KEY") || envValueBase64("DASHSCOPE_API_KEY_B64") || envValueBase64("RAG_EMBED_DIMENSIONS")
+  return envValue("DASHSCOPE_API_KEY") || envValueBase64("DASHSCOPE_API_KEY_B64")
 }
 
 function dashScopeBaseUrl(): string {
