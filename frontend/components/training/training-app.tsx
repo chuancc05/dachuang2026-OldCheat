@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { ScenarioRail } from "@/components/training/scenario-rail"
 import { SimulationStage, type Message } from "@/components/training/simulation-stage"
 import { CoachPanel } from "@/components/training/coach-panel"
+import { type RagDebugInfo } from "@/components/training/rag-debug-panel"
 import { ReplyBar } from "@/components/training/reply-bar"
 import { ReportDialog, type ReportEvent, type ReportEvaluation } from "@/components/training/report-dialog"
 import { MobileTrainingFlow } from "@/components/training/mobile-training-flow"
@@ -125,6 +126,42 @@ function formatDuration(s: number) {
   return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`
 }
 
+function parseRagDebugInfo(value: unknown): RagDebugInfo | null {
+  if (!value || typeof value !== "object") return null
+  const rag = value as Partial<RagDebugInfo>
+  const mode = rag.mode === "vector" || rag.mode === "lexical" || rag.mode === "off" ? rag.mode : "off"
+  const references = Array.isArray(rag.references)
+    ? rag.references.flatMap((item) => {
+      if (!item || typeof item !== "object") return []
+      const reference = item as Partial<RagDebugInfo["references"][number]>
+      if (
+        typeof reference.id !== "string" ||
+        typeof reference.sceneId !== "string" ||
+        typeof reference.sceneName !== "string" ||
+        !["scenario-library", "teleantifraud-ledger", "supplemental-material"].includes(reference.source ?? "")
+      ) {
+        return []
+      }
+      return [{
+        id: reference.id,
+        sceneId: reference.sceneId,
+        sceneName: reference.sceneName,
+        source: reference.source as RagDebugInfo["references"][number]["source"],
+        tags: Array.isArray(reference.tags) ? reference.tags.filter((tag): tag is string => typeof tag === "string") : [],
+        score: typeof reference.score === "number" ? reference.score : 0,
+        excerpt: typeof reference.excerpt === "string" ? reference.excerpt : "",
+      }]
+    })
+    : []
+  return {
+    enabled: Boolean(rag.enabled),
+    mode,
+    count: typeof rag.count === "number" ? rag.count : references.length,
+    error: typeof rag.error === "string" ? rag.error : undefined,
+    references,
+  }
+}
+
 function useMobileViewport() {
   const [isMobile, setIsMobile] = useState(false)
 
@@ -193,6 +230,8 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
   const [reportOpen, setReportOpen] = useState(false)
   const [coreCompleteNotified, setCoreCompleteNotified] = useState(false)
   const [lastAiSource, setLastAiSource] = useState<AiSource>("idle")
+  const [ragDebugEnabled, setRagDebugEnabled] = useState(false)
+  const [lastRagDebug, setLastRagDebug] = useState<RagDebugInfo | null>(null)
   const [reportEvents, setReportEvents] = useState<ReportEvent[]>([])
   const [voicePanelOpen, setVoicePanelOpen] = useState(false)
   const [voiceStatus, setVoiceStatus] = useState<VoiceCallStatus>("idle")
@@ -200,6 +239,10 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
   const [voiceTranscript, setVoiceTranscript] = useState<VoiceTranscript | null>(null)
   const [voiceError, setVoiceError] = useState("")
   const [voiceMuted, setVoiceMuted] = useState(false)
+
+  useEffect(() => {
+    setRagDebugEnabled(new URLSearchParams(window.location.search).get("ragDebug") === "1")
+  }, [])
 
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null)
@@ -285,6 +328,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     setReportOpen(false)
     setCoreCompleteNotified(false)
     setLastAiSource("idle")
+    setLastRagDebug(null)
     setReportEvents([])
     setVoicePanelOpen(false)
     setVoiceStatus("idle")
@@ -375,6 +419,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
         if (!response.ok) throw new Error(`AI route returned ${response.status}`)
         const turn = await response.json()
         const source = parseAiSource(turn.source)
+        setLastRagDebug(parseRagDebugInfo(turn.rag))
         const trigger = typeof turn.trigger === "string" ? turn.trigger : undefined
         const riskDelta = typeof turn.riskDelta === "number" ? turn.riskDelta : 2
         const coach = typeof turn.coach === "string" ? turn.coach : DEFAULT_ADVICE
@@ -436,6 +481,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
         nextScammerTurn = audioTurn
         const reportAudioCues = realtimeVoiceRef.current ? audioTurn.cues : []
         setLastAiSource("fallback")
+        setLastRagDebug(null)
         setMessages((items) => [
           ...items,
           {
@@ -1061,6 +1107,8 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
             finished={finished}
             started={started}
             onReport={() => setReportOpen(true)}
+            ragDebugEnabled={ragDebugEnabled}
+            ragDebug={lastRagDebug}
           />
         </div>
       </div>

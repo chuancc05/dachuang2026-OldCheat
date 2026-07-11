@@ -7,8 +7,9 @@
         "build": "next build",
         "start": "next start -p 3000",
         "lint": "eslint .",
-        "rag:build": "node scripts/build-rag-index.mjs",
-        "voice:gateway": "node voice-gateway/server.mjs",
+    "rag:build": "node scripts/build-rag-index.mjs",
+    "scenarios:check": "node scripts/check-scenario-quality.mjs",
+    "voice:gateway": "node voice-gateway/server.mjs",
         "audio:cues": "node scripts/generate-audio-cues.mjs"
     },
     "dependencies": {

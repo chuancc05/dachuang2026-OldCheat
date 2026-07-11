@@ -5,6 +5,7 @@ import { riskLevel } from "@/lib/scenarios"
 import { cn } from "@/lib/utils"
 import { Activity, Lightbulb, FileText, ShieldCheck, TriangleAlert, Award } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { RagDebugPanel, type RagDebugInfo } from "./rag-debug-panel"
 
 interface CoachPanelProps {
   risk: number
@@ -16,6 +17,8 @@ interface CoachPanelProps {
   finished: boolean
   started: boolean
   onReport: () => void
+  ragDebugEnabled?: boolean
+  ragDebug?: RagDebugInfo | null
 }
 
 export function CoachPanel({
@@ -28,6 +31,8 @@ export function CoachPanel({
   finished,
   started,
   onReport,
+  ragDebugEnabled = false,
+  ragDebug = null,
 }: CoachPanelProps) {
   const { tone } = riskLevel(risk)
   const toneRing = {
@@ -85,6 +90,8 @@ export function CoachPanel({
         </div>
         <p className="text-sm leading-relaxed text-foreground/90 text-pretty">{advice}</p>
       </div>
+
+      {ragDebugEnabled && <RagDebugPanel info={ragDebug} />}
 
       {/* report */}
       <div className="mt-auto rounded-2xl border bg-card p-4">

@@ -14,6 +14,34 @@ interface ChatRequest {
 type AiProvider = "auto" | "deepseek" | "ollama"
 type AiSource = "deepseek" | "ollama" | "fallback"
 
+function redactRagExcerpt(value: string): string {
+  return value
+    .replace(/https?:\/\/\S+/giu, "[已隐藏链接]")
+    .replace(/\b1[3-9]\d{9}\b/gu, "[已隐藏手机号]")
+    .replace(/(?:账号|账户|银行卡)\s*[：:]?\s*\d{8,}/gu, (match) => match.replace(/\d/g, "*"))
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, 120)
+}
+
+function ragDebugPayload(context: RagContext) {
+  return {
+    enabled: context.enabled,
+    mode: context.mode,
+    count: context.references.length,
+    error: context.error,
+    references: context.references.map((reference) => ({
+      id: reference.id,
+      sceneId: reference.sceneId,
+      sceneName: reference.sceneName,
+      source: reference.source,
+      tags: reference.tags.slice(0, 5),
+      score: Number(reference.score.toFixed(3)),
+      excerpt: redactRagExcerpt(reference.text),
+    })),
+  }
+}
+
 function envValue(key: string): string {
   return (process.env[key] ?? "").trim()
 }
@@ -360,13 +388,7 @@ export async function POST(request: NextRequest) {
       riskDelta: Math.min(4.5, 1.8 + turnIndex * 0.35),
       coach: buildCoach(trigger),
       source: result.source,
-      rag: {
-        enabled: ragContext.enabled,
-        mode: ragContext.mode,
-        count: ragContext.references.length,
-        ids: ragContext.references.map((ref) => ref.id),
-        error: ragContext.error,
-      },
+      rag: ragDebugPayload(ragContext),
     })
   } catch (error) {
     const fallback = fallbackTurn(scenario, turnIndex)
@@ -376,13 +398,7 @@ export async function POST(request: NextRequest) {
       line: audioTurn.line,
       audioCues: audioTurn.cues,
       source: "fallback" satisfies AiSource,
-      rag: {
-        enabled: ragContext.enabled,
-        mode: ragContext.mode,
-        count: ragContext.references.length,
-        ids: ragContext.references.map((ref) => ref.id),
-        error: ragContext.error,
-      },
+      rag: ragDebugPayload(ragContext),
       error: error instanceof Error ? error.message : "Unknown AI provider error",
     })
   }
