@@ -1028,6 +1028,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
             onReport={() => setReportOpen(true)}
             ragDebugEnabled={ragDebugEnabled}
             ragDebug={lastRagDebug}
+            aiSource={lastAiSource}
           />
         </div>
       </div>

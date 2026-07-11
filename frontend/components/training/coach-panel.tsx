@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils"
 import { Activity, Lightbulb, FileText, ShieldCheck, TriangleAlert, Award } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { RagDebugPanel, type RagDebugInfo } from "./rag-debug-panel"
+import { RuntimeStatusPanel } from "./runtime-status-panel"
 
 interface CoachPanelProps {
   risk: number
@@ -19,6 +20,7 @@ interface CoachPanelProps {
   onReport: () => void
   ragDebugEnabled?: boolean
   ragDebug?: RagDebugInfo | null
+  aiSource?: "idle" | "deepseek" | "ollama" | "fallback"
 }
 
 export function CoachPanel({
@@ -33,6 +35,7 @@ export function CoachPanel({
   onReport,
   ragDebugEnabled = false,
   ragDebug = null,
+  aiSource = "idle",
 }: CoachPanelProps) {
   const { tone } = riskLevel(risk)
   const toneRing = {
@@ -90,6 +93,8 @@ export function CoachPanel({
         </div>
         <p className="text-sm leading-relaxed text-foreground/90 text-pretty">{advice}</p>
       </div>
+
+      <RuntimeStatusPanel aiSource={aiSource} ragDebug={ragDebug} />
 
       {ragDebugEnabled && <RagDebugPanel info={ragDebug} />}
 

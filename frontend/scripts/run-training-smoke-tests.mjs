@@ -88,4 +88,23 @@ check("语气提示不会作为对话内容展示或朗读", () => {
   assert.match(scenarioAudio, /stripSpeechCues\(turn\.line\)/u, "TTS 片段没有过滤语气提示")
 })
 
+check("线上健康检查不缓存且只返回非敏感运行状态", () => {
+  const route = readText("app/api/health/route.ts")
+  const runtimeStatus = readText("lib/runtime-status.ts")
+  assert.match(route, /export const dynamic = "force-dynamic"/u, "健康检查必须是动态响应")
+  assert.match(route, /Cache-Control": "no-store, max-age=0"/u, "健康检查不能被 CDN 缓存")
+  assert.match(route, /getRuntimeStatus\(\)/u, "健康检查缺少运行状态响应")
+  assert.doesNotMatch(route, /process\.env/u, "健康路由不应直接映射环境变量")
+  assert.match(runtimeStatus, /fallbackReady: true/u, "健康状态缺少场景库兜底声明")
+  assert.match(runtimeStatus, /browserFallbackReady: true/u, "健康状态缺少浏览器语音兜底声明")
+  assert.match(runtimeStatus, /textFallbackReady: true/u, "健康状态缺少文字训练兜底声明")
+})
+
+check("RAG 配置异常时保留关键词检索兜底", () => {
+  const rag = readText("lib/rag.ts")
+  assert.match(rag, /mode: "lexical"/u, "RAG 缺少关键词检索模式")
+  assert.match(rag, /lexicalFallbackReady/u, "RAG 运行状态缺少兜底声明")
+  assert.match(rag, /catch \(error\)[\s\S]{0,1600}mode: "lexical"/u, "向量检索失败后未回退关键词检索")
+})
+
 console.log("\n训练系统离线验收通过：场景、RAG、API 兜底和语音降级均已检查。")

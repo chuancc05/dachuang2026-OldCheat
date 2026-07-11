@@ -47,6 +47,14 @@ export interface RagContext {
   error?: string
 }
 
+export interface RagRuntimeStatus {
+  enabled: boolean
+  mode: "vector" | "lexical" | "off"
+  provider: "dashscope" | "ollama" | "none"
+  documentCount: number
+  lexicalFallbackReady: boolean
+}
+
 let documentCache: RagDocument[] | null = null
 
 function envValue(key: string): string {
@@ -290,6 +298,23 @@ function loadDocuments(): RagDocument[] {
       ...buildDocumentsFromSupplemental(root),
     ]
   return documentCache
+}
+
+/** Returns configuration-safe RAG readiness without calling an embedding provider. */
+export function getRagRuntimeStatus(): RagRuntimeStatus {
+  const enabled = ragEnabled()
+  const provider = ragEmbedProvider()
+  const documentCount = loadDocuments().length
+  const vectorRequested = enabled && ragUseVector() && provider !== "none"
+  const providerConfigured = provider === "dashscope" ? Boolean(dashScopeApiKey()) : Boolean(ollamaUrl())
+
+  return {
+    enabled,
+    mode: !enabled ? "off" : vectorRequested && providerConfigured ? "vector" : "lexical",
+    provider,
+    documentCount,
+    lexicalFallbackReady: enabled && documentCount > 0,
+  }
 }
 
 function scenarioTerms(scenario: Scenario): string[] {
