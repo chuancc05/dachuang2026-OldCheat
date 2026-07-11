@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react"
 import { Button } from "@/components/ui/button"
 import type { Scenario } from "@/lib/scenarios"
 import { cn } from "@/lib/utils"
+import { audioCueLabels, type AudioCue } from "@/lib/voice/scenario-audio"
 import {
   X,
   ShieldCheck,
@@ -14,6 +15,7 @@ import {
   ListChecks,
   MessageSquareText,
   Sparkles,
+  Volume2,
 } from "lucide-react"
 
 export type ReportEvaluation = "safe" | "risky" | "mixed" | "neutral"
@@ -27,6 +29,7 @@ export interface ReportEvent {
   evaluation: ReportEvaluation
   reason: string
   aiSource: "deepseek" | "ollama" | "fallback" | "idle"
+  audioCues?: AudioCue[]
 }
 
 interface AiReport {
@@ -160,6 +163,7 @@ export function ReportDialog({
     defenseScore >= 60 ? "text-safe" : defenseScore >= 40 ? "text-warning-foreground" : "text-danger"
 
   const triggerStats = countBy(triggers)
+  const audioCueStats = countBy(events.flatMap((event) => audioCueLabels(event.audioCues ?? [])))
   const riskyEvents = events.filter((event) => event.evaluation === "risky" || event.evaluation === "mixed")
   const timeline = buildTimeline(events)
   const scoreReasons = buildScoreReasons(defenseScore, goodMoves, riskyMoves, peakRisk, turns)
@@ -234,6 +238,24 @@ export function ReportDialog({
               </span>
             ))}
           </div>
+        )}
+
+        {audioCueStats.length > 0 && (
+          <>
+            <SectionTitle icon={<Volume2 className="size-4" />} title="关键声音线索" />
+            <div className="rounded-2xl border bg-muted/30 p-3">
+              <div className="flex flex-wrap gap-2">
+                {audioCueStats.map(({ name, count }) => (
+                  <span key={name} className="rounded-full bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary">
+                    {name} × {count}
+                  </span>
+                ))}
+              </div>
+              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                以上为模拟训练线索，不保存或回放原始音频。
+              </p>
+            </div>
+          </>
         )}
 
         <SectionTitle icon={<MessageSquareText className="size-4" />} title="关键轮次复盘" />
@@ -336,6 +358,7 @@ function TimelineCard({ event }: { event: ReportEvent }) {
     mixed: "有防御也有风险",
     neutral: "中性回复",
   }[event.evaluation]
+  const audioLabels = audioCueLabels(event.audioCues ?? [])
 
   return (
     <div className="rounded-2xl border bg-card p-4">
@@ -357,6 +380,12 @@ function TimelineCard({ event }: { event: ReportEvent }) {
           <span className="font-semibold text-muted-foreground">用户回复：</span>
           <span className="text-foreground/90">{event.userText}</span>
         </p>
+        {audioLabels.length > 0 && (
+          <p>
+            <span className="font-semibold text-muted-foreground">本轮声音线索：</span>
+            <span className="text-foreground/90">{audioLabels.join("、")}</span>
+          </p>
+        )}
         <p className="text-muted-foreground">{event.reason}</p>
       </div>
     </div>

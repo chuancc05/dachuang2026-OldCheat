@@ -8,7 +8,8 @@
         "start": "next start -p 3000",
         "lint": "eslint .",
         "rag:build": "node scripts/build-rag-index.mjs",
-        "voice:gateway": "node voice-gateway/server.mjs"
+        "voice:gateway": "node voice-gateway/server.mjs",
+        "audio:cues": "node scripts/generate-audio-cues.mjs"
     },
     "dependencies": {
         "@base-ui/react": "^1.5.0",

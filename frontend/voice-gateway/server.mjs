@@ -18,6 +18,7 @@ const ASR_URL =
 const TTS_URL =
   process.env.DASHSCOPE_TTS_WS_URL ||
   "wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model=qwen3-tts-flash-realtime"
+const TTS_INSTRUCT_URL = process.env.DASHSCOPE_TTS_INSTRUCT_WS_URL || ""
 const TTS_VOICE = process.env.DASHSCOPE_TTS_VOICE || "Cherry"
 const ASR_SAMPLE_RATE = Number(process.env.VOICE_ASR_SAMPLE_RATE || 16000)
 const TTS_SAMPLE_RATE = Number(process.env.VOICE_TTS_SAMPLE_RATE || 24000)
@@ -94,7 +95,9 @@ async function handleClientEvent(client, session, event) {
     case "tts.speak":
       if (typeof event.text === "string" && event.text.trim()) {
         const speech = splitSpeechCue(event.text.trim())
-        await speakText(client, session, speech.speechText, speech.instructions, event.voice)
+        const requestedInstructions = typeof event.instructions === "string" ? event.instructions.trim() : ""
+        const instructions = requestedInstructions || speech.instructions
+        await speakText(client, session, speech.speechText, instructions, event.voice, Boolean(requestedInstructions))
       }
       break
     case "tts.stop":
@@ -186,17 +189,26 @@ function startAsr(client, session) {
   })
 }
 
-function speakText(client, session, text, instructions = "", requestedVoice = "") {
+function speakText(client, session, text, instructions = "", requestedVoice = "", preferInstruct = false) {
   closeSocket(session.tts)
   session.ttsPendingText = text
-  const supportsInstructions = /instruct/i.test(TTS_URL)
+  const ttsUrl = preferInstruct && TTS_INSTRUCT_URL ? TTS_INSTRUCT_URL : TTS_URL
+  const supportsInstructions = /instruct/i.test(ttsUrl)
   const voice = resolveTtsVoice(requestedVoice)
 
   return new Promise((resolvePromise) => {
-    const tts = new WebSocket(TTS_URL, { headers: upstreamHeaders() })
+    const tts = new WebSocket(ttsUrl, { headers: upstreamHeaders() })
     session.tts = tts
     let sentText = false
     let sentDone = false
+    let reportedError = false
+    const timeout = setTimeout(() => {
+      if (sentDone || reportedError) return
+      reportedError = true
+      sendClient(client, { type: "error", scope: "tts", message: "DashScope TTS session timed out" })
+      closeSocket(tts)
+      resolvePromise()
+    }, 30_000)
 
     const sendText = () => {
       if (sentText || tts.readyState !== WebSocket.OPEN) return
@@ -209,6 +221,7 @@ function speakText(client, session, text, instructions = "", requestedVoice = ""
     const finishTts = () => {
       if (sentDone) return
       sentDone = true
+      clearTimeout(timeout)
       sendClient(client, { type: "tts.done" })
       if (tts.readyState === WebSocket.OPEN) {
         tts.send(JSON.stringify({ event_id: eventId("tts_finish"), type: "session.finish" }))
@@ -218,7 +231,7 @@ function speakText(client, session, text, instructions = "", requestedVoice = ""
     tts.on("open", () => {
       const ttsSession = {
         voice,
-        mode: "server_commit",
+        mode: "commit",
         language_type: "Chinese",
         response_format: "pcm",
         sample_rate: TTS_SAMPLE_RATE,
@@ -235,6 +248,18 @@ function speakText(client, session, text, instructions = "", requestedVoice = ""
 
       if (event.type === "session.updated") {
         sendText()
+        return
+      }
+
+      if (event.type === "error") {
+        reportedError = true
+        clearTimeout(timeout)
+        sendClient(client, {
+          type: "error",
+          scope: "tts",
+          message: event.error?.message || event.message || "DashScope TTS returned an error",
+        })
+        closeSocket(tts)
         return
       }
 
@@ -255,11 +280,18 @@ function speakText(client, session, text, instructions = "", requestedVoice = ""
     })
 
     tts.on("error", (error) => {
+      reportedError = true
+      clearTimeout(timeout)
       sendClient(client, { type: "error", scope: "tts", message: readableError(error) })
       resolvePromise()
     })
 
     tts.on("close", () => {
+      clearTimeout(timeout)
+      if (!sentDone && !reportedError) {
+        reportedError = true
+        sendClient(client, { type: "error", scope: "tts", message: "DashScope TTS connection closed early" })
+      }
       if (session.tts === tts) session.tts = null
     })
   })
@@ -306,6 +338,7 @@ function mapAsrEvent(event, lastPartial) {
 function upstreamHeaders({ beta = false } = {}) {
   const headers = {
     Authorization: `Bearer ${API_KEY}`,
+    "user-agent": "oldcheat-voice-gateway",
   }
   if (WORKSPACE_ID) headers["X-DashScope-WorkSpace"] = WORKSPACE_ID
   if (beta) headers["OpenAI-Beta"] = "realtime=v1"

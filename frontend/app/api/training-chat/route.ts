@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import type { Message } from "@/components/training/simulation-stage"
 import type { Scenario, ScriptTurn } from "@/lib/scenarios"
 import { formatRagReferences, retrieveRagContext, type RagContext } from "@/lib/rag"
+import { audioCuePrompt, createAudioTurn } from "@/lib/voice/scenario-audio"
 
 interface ChatRequest {
   scenario: Scenario
@@ -163,7 +164,7 @@ function sanitizeAiText(value: string): string {
     .slice(0, 180)
 }
 
-function buildSystemPrompt(scenario: Scenario, ragContext?: RagContext): string {
+function buildSystemPrompt(scenario: Scenario, turnIndex: number, ragContext?: RagContext): string {
   const examples = scenario.script
     .slice(0, 8)
     .map((turn, index) => `${index + 1}. ${turn.line}`)
@@ -196,10 +197,17 @@ function buildSystemPrompt(scenario: Scenario, ragContext?: RagContext): string 
     "8. Treat retrieved references as style and risk-pattern examples only. Do not copy full sample text verbatim.",
     "Identity consistency rules:",
     ...buildIdentityRules(scenario),
+    ...audioCuePrompt(scenario, turnIndex),
   ].join("\n")
 }
 
-function buildMessages(scenario: Scenario, messages: Message[], userText: string, ragContext?: RagContext) {
+function buildMessages(
+  scenario: Scenario,
+  messages: Message[],
+  userText: string,
+  turnIndex: number,
+  ragContext?: RagContext,
+) {
   const recent = messages
     .filter((message) => message.sender !== "system")
     .slice(-10)
@@ -209,7 +217,7 @@ function buildMessages(scenario: Scenario, messages: Message[], userText: string
     }))
 
   return [
-    { role: "system", content: buildSystemPrompt(scenario, ragContext) },
+    { role: "system", content: buildSystemPrompt(scenario, turnIndex, ragContext) },
     ...recent,
     { role: "user", content: userText },
   ]
@@ -229,6 +237,7 @@ async function askDeepSeek(
   scenario: Scenario,
   messages: Message[],
   userText: string,
+  turnIndex: number,
   ragContext?: RagContext,
 ): Promise<string> {
   const apiKey = deepSeekApiKey()
@@ -243,7 +252,7 @@ async function askDeepSeek(
       },
       body: JSON.stringify({
         model: deepSeekDialogModel(),
-        messages: buildMessages(scenario, messages, userText, ragContext),
+        messages: buildMessages(scenario, messages, userText, turnIndex, ragContext),
         stream: false,
         temperature: 1.1,
         max_tokens: 220,
@@ -264,6 +273,7 @@ async function askOllama(
   scenario: Scenario,
   messages: Message[],
   userText: string,
+  turnIndex: number,
   ragContext?: RagContext,
 ): Promise<string> {
   return withTimeout(45_000, async (signal) => {
@@ -273,7 +283,7 @@ async function askOllama(
       body: JSON.stringify({
         model: ollamaModel(),
         stream: false,
-        messages: buildMessages(scenario, messages, userText, ragContext),
+        messages: buildMessages(scenario, messages, userText, turnIndex, ragContext),
         options: {
           temperature: 0.78,
           top_p: 0.9,
@@ -304,6 +314,7 @@ async function generateAiLine(
   scenario: Scenario,
   messages: Message[],
   userText: string,
+  turnIndex: number,
   ragContext?: RagContext,
 ): Promise<{ line: string; source: Exclude<AiSource, "fallback">; errors: string[] }> {
   const errors: string[] = []
@@ -312,8 +323,8 @@ async function generateAiLine(
     try {
       const line =
         provider === "deepseek"
-          ? await askDeepSeek(scenario, messages, userText, ragContext)
-          : await askOllama(scenario, messages, userText, ragContext)
+          ? await askDeepSeek(scenario, messages, userText, turnIndex, ragContext)
+          : await askOllama(scenario, messages, userText, turnIndex, ragContext)
       return { line, source: provider, errors }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -339,11 +350,12 @@ export async function POST(request: NextRequest) {
   const ragContext = await retrieveRagContext(scenario, messages, userText.trim())
 
   try {
-    const result = await generateAiLine(scenario, messages, userText.trim(), ragContext)
-    const line = normalizeAiIdentity(result.line, scenario)
-    const trigger = pickTrigger(scenario, line, turnIndex)
+    const result = await generateAiLine(scenario, messages, userText.trim(), turnIndex, ragContext)
+    const audioTurn = createAudioTurn(scenario, normalizeAiIdentity(result.line, scenario), turnIndex)
+    const trigger = pickTrigger(scenario, audioTurn.line, turnIndex)
     return NextResponse.json({
-      line,
+      line: audioTurn.line,
+      audioCues: audioTurn.cues,
       trigger,
       riskDelta: Math.min(4.5, 1.8 + turnIndex * 0.35),
       coach: buildCoach(trigger),
@@ -358,8 +370,11 @@ export async function POST(request: NextRequest) {
     })
   } catch (error) {
     const fallback = fallbackTurn(scenario, turnIndex)
+    const audioTurn = createAudioTurn(scenario, fallback.line, turnIndex)
     return NextResponse.json({
       ...fallback,
+      line: audioTurn.line,
+      audioCues: audioTurn.cues,
       source: "fallback" satisfies AiSource,
       rag: {
         enabled: ragContext.enabled,

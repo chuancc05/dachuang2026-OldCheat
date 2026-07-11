@@ -1,5 +1,7 @@
 "use client"
 
+import type { VoicePlaybackSegment } from "@/lib/voice/scenario-audio"
+
 type RealtimeVoiceClientOptions = {
   url?: string
   onReady?: () => void
@@ -34,10 +36,16 @@ export class RealtimeVoiceClient {
   private stream: MediaStream | null = null
   private inputContext: AudioContext | null = null
   private outputContext: AudioContext | null = null
+  private outputGain: GainNode | null = null
   private sourceNode: MediaStreamAudioSourceNode | null = null
   private processorNode: ScriptProcessorNode | null = null
   private nextPlayTime = 0
-  private ttsEndTimer: number | null = null
+  private sequenceTimer: number | null = null
+  private playbackQueue: VoicePlaybackSegment[] = []
+  private activeTtsFallbackSrc: string | null = null
+  private activeTtsFallbackText: string | null = null
+  private ttsInFlight = false
+  private muted = false
   private listening = false
 
   constructor(options: RealtimeVoiceClientOptions = {}) {
@@ -47,6 +55,10 @@ export class RealtimeVoiceClient {
 
   get connected() {
     return this.socket?.readyState === WebSocket.OPEN
+  }
+
+  get isMuted() {
+    return this.muted
   }
 
   async connect() {
@@ -74,6 +86,7 @@ export class RealtimeVoiceClient {
       socket.onclose = () => {
         this.socket = null
         this.stopListening(false)
+        this.cancelPlayback(false)
         this.options.onClose?.()
       }
     })
@@ -109,34 +122,100 @@ export class RealtimeVoiceClient {
     }
   }
 
-  async speak(text: string, voice?: string) {
-    const trimmed = text.trim()
-    if (!trimmed) return
+  async speak(text: string, voice?: string, instructions?: string) {
+    return this.playSequence([{ kind: "tts", text, voice, instructions }])
+  }
+
+  async playSequence(segments: VoicePlaybackSegment[]) {
+    const validSegments = segments.filter((segment) => segment.kind === "asset" || segment.text.trim())
+    if (validSegments.length === 0) return
+
     await this.connect()
     this.stopListening(false)
-    this.stopPlayback()
-    this.send({ type: "tts.speak", text: trimmed, voice })
+    this.cancelPlayback()
+    this.playbackQueue = [...validSegments]
+    const firstTts = validSegments.find((segment) => segment.kind === "tts")
+    this.options.onTtsStart?.(firstTts?.kind === "tts" ? firstTts.text : undefined)
+    void this.playNextSegment()
+  }
+
+  setMuted(nextMuted: boolean) {
+    this.muted = nextMuted
+    if (this.outputGain) this.outputGain.gain.value = nextMuted ? 0 : 1
   }
 
   stopPlayback() {
-    if (this.ttsEndTimer) {
-      window.clearTimeout(this.ttsEndTimer)
-      this.ttsEndTimer = null
-    }
-    this.nextPlayTime = 0
-    if (this.outputContext) {
-      void this.outputContext.close()
-      this.outputContext = null
-    }
-    this.send({ type: "tts.stop" })
+    this.cancelPlayback()
   }
 
   close() {
     this.stopListening(false)
-    this.stopPlayback()
+    this.cancelPlayback()
     this.send({ type: "close" })
     this.socket?.close()
     this.socket = null
+  }
+
+  private async playNextSegment() {
+    const segment = this.playbackQueue.shift()
+    if (!segment) {
+      this.options.onTtsEnd?.()
+      return
+    }
+
+    if (segment.kind === "asset") {
+      try {
+        await this.playAsset(segment.src)
+      } catch (error) {
+        this.options.onError?.("场景音效未能播放，已自动跳过。", "asset")
+        console.warn("Failed to play audio cue", error)
+      }
+      this.scheduleQueueAdvance()
+      return
+    }
+
+    this.activeTtsFallbackSrc = segment.fallbackSrc ?? null
+    this.activeTtsFallbackText = segment.text.trim()
+    this.ttsInFlight = true
+    this.send({
+      type: "tts.speak",
+      text: segment.text.trim(),
+      voice: segment.voice,
+      instructions: segment.instructions,
+    })
+  }
+
+  private scheduleQueueAdvance() {
+    if (this.sequenceTimer) window.clearTimeout(this.sequenceTimer)
+    const delay = this.outputContext
+      ? Math.max(80, (this.nextPlayTime - this.outputContext.currentTime) * 1000 + 120)
+      : 80
+    this.sequenceTimer = window.setTimeout(() => {
+      this.sequenceTimer = null
+      void this.playNextSegment()
+    }, delay)
+  }
+
+  private cancelPlayback(notifyGateway = true) {
+    if (this.sequenceTimer) {
+      window.clearTimeout(this.sequenceTimer)
+      this.sequenceTimer = null
+    }
+    this.playbackQueue = []
+    this.activeTtsFallbackSrc = null
+    this.activeTtsFallbackText = null
+    const shouldStopTts = notifyGateway && this.ttsInFlight
+    this.ttsInFlight = false
+    this.nextPlayTime = 0
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel()
+    }
+    if (this.outputContext) {
+      void this.outputContext.close()
+      this.outputContext = null
+      this.outputGain = null
+    }
+    if (shouldStopTts) this.send({ type: "tts.stop" })
   }
 
   private async ensureInput() {
@@ -168,28 +247,67 @@ export class RealtimeVoiceClient {
     this.processorNode.connect(this.inputContext.destination)
   }
 
-  private async playPcm(base64Audio: string, sampleRate: number) {
+  private async ensureOutput() {
     const AudioContextCtor = getAudioContext()
     if (!AudioContextCtor) throw new Error("This browser does not support Web Audio")
     if (!this.outputContext || this.outputContext.state === "closed") {
       this.outputContext = new AudioContextCtor()
+      this.outputGain = this.outputContext.createGain()
+      this.outputGain.gain.value = this.muted ? 0 : 1
+      this.outputGain.connect(this.outputContext.destination)
       this.nextPlayTime = this.outputContext.currentTime
     }
     if (this.outputContext.state === "suspended") await this.outputContext.resume()
+    return this.outputContext
+  }
 
+  private async playPcm(base64Audio: string, sampleRate: number) {
+    const context = await this.ensureOutput()
     const pcm = base64ToInt16(base64Audio)
-    const buffer = this.outputContext.createBuffer(1, pcm.length, sampleRate || TTS_SAMPLE_RATE)
+    const buffer = context.createBuffer(1, pcm.length, sampleRate || TTS_SAMPLE_RATE)
     const channel = buffer.getChannelData(0)
     for (let index = 0; index < pcm.length; index += 1) {
       channel[index] = Math.max(-1, Math.min(1, pcm[index] / 32768))
     }
 
-    const source = this.outputContext.createBufferSource()
+    const source = context.createBufferSource()
     source.buffer = buffer
-    source.connect(this.outputContext.destination)
-    const startAt = Math.max(this.nextPlayTime, this.outputContext.currentTime + 0.02)
+    source.connect(this.outputGain ?? context.destination)
+    const startAt = Math.max(this.nextPlayTime, context.currentTime + 0.02)
     source.start(startAt)
     this.nextPlayTime = startAt + buffer.duration
+  }
+
+  private async playAsset(src: string) {
+    const context = await this.ensureOutput()
+    const response = await fetch(src)
+    if (!response.ok) throw new Error(`Audio asset returned ${response.status}`)
+    const raw = await response.arrayBuffer()
+    const buffer = await context.decodeAudioData(raw.slice(0))
+    const source = context.createBufferSource()
+    source.buffer = buffer
+    source.connect(this.outputGain ?? context.destination)
+    const startAt = Math.max(this.nextPlayTime, context.currentTime + 0.02)
+    source.start(startAt)
+    this.nextPlayTime = startAt + buffer.duration
+  }
+
+  private playBrowserSpeech(text: string) {
+    return new Promise<void>((resolve) => {
+      if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+        resolve()
+        return
+      }
+
+      const utterance = new SpeechSynthesisUtterance(text)
+      utterance.lang = "zh-CN"
+      utterance.rate = 1
+      utterance.volume = this.muted ? 0 : 1
+      utterance.onend = () => resolve()
+      utterance.onerror = () => resolve()
+      window.speechSynthesis.cancel()
+      window.speechSynthesis.speak(utterance)
+    })
   }
 
   private handleGatewayMessage(raw: string) {
@@ -212,7 +330,6 @@ export class RealtimeVoiceClient {
         if (event.text) this.options.onFinal?.(event.text)
         break
       case "tts.started":
-        this.options.onTtsStart?.(event.text)
         break
       case "tts.audio":
         if (event.audio) {
@@ -222,23 +339,36 @@ export class RealtimeVoiceClient {
         }
         break
       case "tts.done":
-        this.notifyTtsEndAfterPlayback()
+        if (!this.ttsInFlight) break
+        this.activeTtsFallbackSrc = null
+        this.activeTtsFallbackText = null
+        this.ttsInFlight = false
+        this.scheduleQueueAdvance()
         break
       case "error":
+        if (event.scope === "tts" && this.activeTtsFallbackSrc) {
+          this.playbackQueue.unshift({ kind: "asset", src: this.activeTtsFallbackSrc })
+          this.activeTtsFallbackSrc = null
+          this.activeTtsFallbackText = null
+          this.ttsInFlight = false
+          this.scheduleQueueAdvance()
+          break
+        }
+        if (event.scope === "tts" && this.activeTtsFallbackText) {
+          const fallbackText = this.activeTtsFallbackText
+          this.activeTtsFallbackText = null
+          this.ttsInFlight = false
+          void this.playBrowserSpeech(fallbackText).finally(() => this.scheduleQueueAdvance())
+          this.options.onError?.("阿里云语音暂不可用，已使用浏览器语音继续训练。", event.scope)
+          break
+        }
+        if (event.scope === "tts") {
+          this.ttsInFlight = false
+          this.scheduleQueueAdvance()
+        }
         this.options.onError?.(event.message || "Voice gateway error", event.scope)
         break
     }
-  }
-
-  private notifyTtsEndAfterPlayback() {
-    if (this.ttsEndTimer) window.clearTimeout(this.ttsEndTimer)
-    const delay = this.outputContext
-      ? Math.max(80, (this.nextPlayTime - this.outputContext.currentTime) * 1000 + 120)
-      : 80
-    this.ttsEndTimer = window.setTimeout(() => {
-      this.ttsEndTimer = null
-      this.options.onTtsEnd?.()
-    }, delay)
   }
 
   private send(payload: unknown) {
@@ -282,8 +412,7 @@ function bytesToBase64(bytes: Uint8Array) {
   let binary = ""
   const chunkSize = 0x8000
   for (let index = 0; index < bytes.length; index += chunkSize) {
-    const chunk = bytes.subarray(index, index + chunkSize)
-    binary += String.fromCharCode(...chunk)
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize))
   }
   return window.btoa(binary)
 }

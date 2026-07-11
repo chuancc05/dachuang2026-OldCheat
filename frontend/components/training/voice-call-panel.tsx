@@ -15,6 +15,7 @@ import {
   Play,
   Radio,
   RotateCcw,
+  VolumeX,
   Volume2,
 } from "lucide-react"
 
@@ -47,7 +48,10 @@ interface VoiceCallPanelProps {
   transcript: VoiceTranscript | null
   error: string
   durationLabel: string
+  muted: boolean
+  muteAvailable: boolean
   onStart: () => void
+  onToggleMute: () => void
   onReplay: () => void
   onStopVoice: () => void
   onHelp: () => void
@@ -119,7 +123,10 @@ export function VoiceCallPanel({
   transcript,
   error,
   durationLabel,
+  muted,
+  muteAvailable,
   onStart,
+  onToggleMute,
   onReplay,
   onStopVoice,
   onHelp,
@@ -190,6 +197,10 @@ export function VoiceCallPanel({
               暂停语音
             </Button>
           )}
+          <Button size="lg" variant="outline" onClick={onToggleMute} disabled={!muteAvailable} className="h-12 text-base">
+            {muted ? <Volume2 className="size-5" /> : <VolumeX className="size-5" />}
+            {muted ? "恢复声音" : "静音"}
+          </Button>
           <Button size="lg" variant="outline" onClick={onReplay} disabled={!canReplay} className="h-12 text-base">
             <RotateCcw className="size-5" />
             再说一遍

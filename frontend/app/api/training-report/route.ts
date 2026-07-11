@@ -9,6 +9,7 @@ interface ReportEvent {
   evaluation: "safe" | "risky" | "mixed" | "neutral"
   reason: string
   aiSource: "deepseek" | "ollama" | "fallback" | "idle"
+  audioCues?: { labels?: string[] }[]
 }
 
 interface ReportRequest {
@@ -73,6 +74,7 @@ function compactEvents(events: ReportEvent[]) {
     trigger: event.trigger,
     evaluation: event.evaluation,
     reason: event.reason,
+    audioCues: (event.audioCues ?? []).flatMap((cue) => cue.labels ?? []).filter(Boolean),
   }))
 }
 

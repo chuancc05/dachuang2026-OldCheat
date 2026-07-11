@@ -16,6 +16,12 @@ import { Button } from "@/components/ui/button"
 import { evaluateReply, type Scenario } from "@/lib/scenarios"
 import { splitSpeechCue } from "@/lib/speech-text"
 import { RealtimeVoiceClient } from "@/lib/voice/realtime-voice-client"
+import {
+  buildVoicePlaybackSegments,
+  createAudioTurn,
+  type AudioCue,
+  type AudioTurn,
+} from "@/lib/voice/scenario-audio"
 import { getScenarioVoice } from "@/lib/voice/scenario-voices"
 import { ShieldHalf, Play, RotateCcw, HelpCircle, PhoneCall } from "lucide-react"
 
@@ -28,6 +34,7 @@ const QUICK_REPLIES = [
 ]
 
 type AiSource = "idle" | "deepseek" | "ollama" | "fallback"
+type TrainingReply = AudioTurn
 
 type BrowserSpeechRecognitionEvent = {
   resultIndex: number
@@ -69,6 +76,37 @@ const VOICE_GATEWAY_URL = process.env.NEXT_PUBLIC_VOICE_GATEWAY_URL || "ws://127
 
 function parseAiSource(value: unknown): AiSource {
   return value === "deepseek" || value === "ollama" || value === "fallback" ? value : "fallback"
+}
+
+function parseAudioCues(value: unknown): AudioCue[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") return []
+    const cue = item as Partial<AudioCue>
+    if (typeof cue.id !== "string" || !Array.isArray(cue.labels) || !Array.isArray(cue.assetPaths)) return []
+    return [{
+      id: cue.id as AudioCue["id"],
+      labels: cue.labels.filter((label): label is string => typeof label === "string" && Boolean(label.trim())),
+      assetPaths: cue.assetPaths.filter((path): path is string => typeof path === "string" && Boolean(path.trim())),
+      dynamicSpeech:
+        cue.dynamicSpeech &&
+        typeof cue.dynamicSpeech.text === "string" &&
+        typeof cue.dynamicSpeech.voice === "string" &&
+        typeof cue.dynamicSpeech.instructions === "string"
+          ? cue.dynamicSpeech
+          : undefined,
+    }]
+  })
+}
+
+function consumeOneShotAudioCues(turn: TrainingReply, consumedCueIds: Set<AudioCue["id"]>): TrainingReply {
+  const cues = turn.cues.filter((cue) => {
+    if (cue.id !== "relative-distress") return true
+    if (consumedCueIds.has(cue.id)) return false
+    consumedCueIds.add(cue.id)
+    return true
+  })
+  return cues.length === turn.cues.length ? turn : { ...turn, cues }
 }
 
 function getSpeechRecognitionConstructor(): BrowserSpeechRecognitionConstructor | null {
@@ -145,6 +183,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
   const [voiceProvider, setVoiceProvider] = useState<VoiceProvider>("unavailable")
   const [voiceTranscript, setVoiceTranscript] = useState<VoiceTranscript | null>(null)
   const [voiceError, setVoiceError] = useState("")
+  const [voiceMuted, setVoiceMuted] = useState(false)
 
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null)
@@ -156,7 +195,9 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
   const transcriptRef = useRef("")
   const transcriptConfidenceRef = useRef<number | undefined>(undefined)
   const lastSpokenLineRef = useRef("")
-  const handleSendRef = useRef<(text: string) => Promise<string | null>>(async () => null)
+  const lastSpokenTurnRef = useRef<TrainingReply | null>(null)
+  const consumedAudioCueIdsRef = useRef<Set<AudioCue["id"]>>(new Set())
+  const handleSendRef = useRef<(text: string) => Promise<TrainingReply | null>>(async () => null)
   const startVoiceListeningRef = useRef<() => void>(() => {})
 
   const stopBrowserVoice = useCallback(() => {
@@ -234,7 +275,10 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     setVoiceProvider("unavailable")
     setVoiceTranscript(null)
     setVoiceError("")
+    setVoiceMuted(false)
     lastSpokenLineRef.current = ""
+    lastSpokenTurnRef.current = null
+    consumedAudioCueIdsRef.current.clear()
   }, [stopBrowserVoice, stopRealtimeVoice])
 
   const revealScammerLine = useCallback(
@@ -283,14 +327,14 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
   const voiceDurationLabel = started ? formatDuration(duration) : "00:00"
 
   const handleSend = useCallback(
-    async (text: string): Promise<string | null> => {
+    async (text: string): Promise<TrainingReply | null> => {
       if (!scenario || !started || finished || typing) return null
 
       const userMessage: Message = { id: nextId(), sender: "user", text }
       const history = messages
       const turnIndex = scammerShown
       const scammerText = lastScammerText(history, scenario, turnIndex)
-      let nextScammerLine: string | null = null
+      let nextScammerTurn: TrainingReply | null = null
       setMessages((items) => [...items, userMessage])
 
       const { delta, hitDefensive, hitRisky } = evaluateReply(text)
@@ -322,12 +366,17 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
         const line = typeof turn.line === "string" && turn.line.trim()
           ? turn.line.trim()
           : fallbackLine ?? "我这边再给您说明一下情况，您先别急着挂断。"
-        nextScammerLine = line
+        const parsedAudioTurn: TrainingReply = { line, cues: parseAudioCues(turn.audioCues) }
+        const audioTurn = realtimeVoiceRef.current
+          ? consumeOneShotAudioCues(parsedAudioTurn, consumedAudioCueIdsRef.current)
+          : parsedAudioTurn
+        nextScammerTurn = audioTurn
+        const reportAudioCues = realtimeVoiceRef.current ? audioTurn.cues : []
 
         setLastAiSource(source)
         setMessages((items) => [
           ...items,
-          { id: nextId(), sender: "scammer", text: line, trigger },
+          { id: nextId(), sender: "scammer", text: audioTurn.line, trigger },
         ])
         setReportEvents((items) => [
           ...items,
@@ -340,6 +389,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
             evaluation: userMove.evaluation,
             reason: userMove.reason,
             aiSource: source,
+            audioCues: reportAudioCues,
           },
         ])
         setScammerShown((count) => count + 1)
@@ -363,14 +413,19 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
         const fallback = scenario.script[turnIndex % Math.max(scenario.script.length, 1)]
         const trigger = fallback?.trigger
         const fallbackLine = fallback?.line ?? "我这边再给您说明一下情况，您先别急着挂断。"
-        nextScammerLine = fallbackLine
+        const parsedAudioTurn = createAudioTurn(scenario, fallbackLine, turnIndex)
+        const audioTurn = realtimeVoiceRef.current
+          ? consumeOneShotAudioCues(parsedAudioTurn, consumedAudioCueIdsRef.current)
+          : parsedAudioTurn
+        nextScammerTurn = audioTurn
+        const reportAudioCues = realtimeVoiceRef.current ? audioTurn.cues : []
         setLastAiSource("fallback")
         setMessages((items) => [
           ...items,
           {
             id: nextId(),
             sender: "scammer",
-            text: fallbackLine,
+            text: audioTurn.line,
             trigger,
           },
           { id: nextId(), sender: "system", text: "AI 暂时未响应，本轮已使用场景库话术兜底。" },
@@ -386,6 +441,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
             evaluation: userMove.evaluation,
             reason: userMove.reason,
             aiSource: "fallback",
+            audioCues: reportAudioCues,
           },
         ])
         setScammerShown((count) => count + 1)
@@ -396,7 +452,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
       } finally {
         setTyping(false)
       }
-      return nextScammerLine
+      return nextScammerTurn
     },
     [scenario, started, finished, typing, messages, scammerShown, bumpRisk, totalTurns, coreCompleteNotified],
   )
@@ -511,10 +567,10 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
 
       setVoiceStatus("thinking")
       void (async () => {
-        const nextLine = await handleSendRef.current(text)
+        const nextTurn = await handleSendRef.current(text)
         if (!voiceLoopRef.current || finishedRef.current) return
-        if (nextLine) {
-          speakScammerLine(nextLine)
+        if (nextTurn) {
+          speakScammerLine(nextTurn.line)
         } else {
           voiceLoopRef.current = false
           setVoiceStatus("paused")
@@ -556,11 +612,24 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     if (realtimeVoiceRef.current && realtimeClientRef.current) {
       setVoiceProvider("dashscope")
       lastSpokenLineRef.current = line
-      void realtimeClientRef.current.speak(line, scenarioVoice.voice)
+      const replayTurn = lastSpokenTurnRef.current ?? createAudioTurn(scenario, line, scammerShown)
+      void realtimeClientRef.current.playSequence(buildVoicePlaybackSegments(replayTurn, scenarioVoice.voice))
       return
     }
     speakScammerLine(line)
   }, [scenario, started, finished, messages, scammerShown, speakScammerLine])
+
+  const handleToggleMute = useCallback(() => {
+    const client = realtimeClientRef.current
+    if (!client || !realtimeVoiceRef.current) {
+      setVoiceError("静音仅在阿里云实时语音训练中可用。")
+      return
+    }
+    const nextMuted = !client.isMuted
+    client.setMuted(nextMuted)
+    setVoiceMuted(nextMuted)
+    setVoiceError("")
+  }, [])
 
   const handleStartBrowserVoice = useCallback(async () => {
     if (!scenario) return
@@ -664,11 +733,12 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
 
         void (async () => {
           try {
-            const nextLine = await handleSendRef.current(transcript)
+            const nextTurn = await handleSendRef.current(transcript)
             if (!realtimeVoiceRef.current || finishedRef.current) return
-            if (nextLine) {
-              lastSpokenLineRef.current = nextLine
-              await client.speak(nextLine, scenarioVoice.voice)
+            if (nextTurn) {
+              lastSpokenLineRef.current = nextTurn.line
+              lastSpokenTurnRef.current = nextTurn
+              await client.playSequence(buildVoicePlaybackSegments(nextTurn, scenarioVoice.voice))
             } else {
               voiceLoopRef.current = false
               realtimeVoiceRef.current = false
@@ -706,6 +776,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
       },
       onError: (message, scope) => {
         console.warn("Realtime voice gateway error", scope, message)
+        if (scope === "asset") return
         if (!realtimeVoiceRef.current) return
         voiceLoopRef.current = false
         realtimeVoiceRef.current = false
@@ -719,6 +790,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
       realtimeVoiceRef.current = true
       voiceLoopRef.current = true
       await client.connect()
+      client.setMuted(voiceMuted)
 
       if (!started) {
         const firstTurn = scenario.script[0]
@@ -740,14 +812,18 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
         setAdvice(firstTurn.coach)
         setLastAiSource("fallback")
         if (firstTurn.trigger) setTriggers((items) => [...items, firstTurn.trigger as string])
-        lastSpokenLineRef.current = firstTurn.line
-        await client.speak(firstTurn.line, scenarioVoice.voice)
+        const firstAudioTurn = createAudioTurn(scenario, firstTurn.line, 0)
+        lastSpokenLineRef.current = firstAudioTurn.line
+        lastSpokenTurnRef.current = firstAudioTurn
+        await client.playSequence(buildVoicePlaybackSegments(firstAudioTurn, scenarioVoice.voice))
         return true
       }
 
       const line = lastScammerText(messages, scenario, scammerShown)
       lastSpokenLineRef.current = line
-      await client.speak(line, scenarioVoice.voice)
+      const resumeTurn = lastSpokenTurnRef.current ?? createAudioTurn(scenario, line, scammerShown)
+      lastSpokenTurnRef.current = resumeTurn
+      await client.playSequence(buildVoicePlaybackSegments(resumeTurn, scenarioVoice.voice))
       return true
     } catch (error) {
       console.warn("Realtime voice gateway unavailable, falling back to browser voice", error)
@@ -765,6 +841,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     bumpRisk,
     stopBrowserVoice,
     stopRealtimeVoice,
+    voiceMuted,
   ])
 
   const handleStartVoice = useCallback(async () => {
@@ -860,7 +937,10 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
             transcript={voiceTranscript}
             error={voiceError}
             durationLabel={voiceDurationLabel}
+            muted={voiceMuted}
+            muteAvailable={voiceProvider === "dashscope" && Boolean(realtimeClientRef.current)}
             onStart={handleStartVoice}
+            onToggleMute={handleToggleMute}
             onReplay={handleReplayVoice}
             onStopVoice={handlePauseVoice}
             onHelp={handleHelp}
