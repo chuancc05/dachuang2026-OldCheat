@@ -37,6 +37,7 @@ interface AiReport {
   improvements: string[]
   elderAdvice: string
   nextTraining: string
+  familyBriefing: string
 }
 
 function envValue(key: string): string {
@@ -84,7 +85,7 @@ function buildPrompt(body: ReportRequest) {
     "请根据本场训练数据，生成简洁、温和、可执行的中文训练总结。",
     "不要编造不存在的对话，不要改变评分，不要输出诈骗操作教程。",
     "请严格输出 JSON，不要 Markdown，不要额外解释。JSON 格式如下：",
-    '{"summary":"本场总体表现总结，80-140字","improvements":["改进点1","改进点2"],"elderAdvice":"给长辈的一段口语化建议，60-120字","nextTraining":"下一次训练建议，40-80字"}',
+    '{"summary":"本场总体表现总结，80-140字","improvements":["改进点1","改进点2"],"elderAdvice":"给长辈的一段口语化建议，60-120字","nextTraining":"下一次训练建议，40-80字","familyBriefing":"给子女或社区工作人员的简短说明，60-100字，包含本场风险表现和陪练建议"}',
     "\n场景信息：",
     JSON.stringify(body.scenario, null, 2),
     "\n训练指标：",
@@ -105,6 +106,7 @@ function extractJson(text: string): AiReport {
     improvements: Array.isArray(parsed.improvements) ? parsed.improvements.map(String).filter(Boolean).slice(0, 2) : [],
     elderAdvice: String(parsed.elderAdvice ?? "").trim(),
     nextTraining: String(parsed.nextTraining ?? "").trim(),
+    familyBriefing: String(parsed.familyBriefing ?? "").trim(),
   }
 }
 

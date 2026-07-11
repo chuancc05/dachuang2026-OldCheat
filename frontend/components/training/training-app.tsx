@@ -930,6 +930,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
         <ReportDialog
           open={reportOpen}
           onClose={() => setReportOpen(false)}
+          scenarios={scenarios}
           scenario={scenario}
           defenseScore={defenseScore}
           goodMoves={goodMoves}
@@ -1067,6 +1068,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
       <ReportDialog
         open={reportOpen}
         onClose={() => setReportOpen(false)}
+        scenarios={scenarios}
         scenario={scenario}
         defenseScore={defenseScore}
         goodMoves={goodMoves}

@@ -15,6 +15,8 @@ import {
   ListChecks,
   MessageSquareText,
   Sparkles,
+  TrendingUp,
+  UsersRound,
   Volume2,
 } from "lucide-react"
 
@@ -37,12 +39,14 @@ interface AiReport {
   improvements: string[]
   elderAdvice: string
   nextTraining: string
+  familyBriefing: string
   source: "deepseek" | "fallback"
 }
 
 interface ReportDialogProps {
   open: boolean
   onClose: () => void
+  scenarios: Scenario[]
   scenario: Scenario | null
   defenseScore: number
   goodMoves: number
@@ -63,6 +67,7 @@ const FALLBACK_TIPS = [
 export function ReportDialog({
   open,
   onClose,
+  scenarios,
   scenario,
   defenseScore,
   goodMoves,
@@ -165,6 +170,17 @@ export function ReportDialog({
   const triggerStats = countBy(triggers)
   const audioCueStats = countBy(events.flatMap((event) => audioCueLabels(event.audioCues ?? [])))
   const riskyEvents = events.filter((event) => event.evaluation === "risky" || event.evaluation === "mixed")
+  const safeEvents = events.filter((event) => event.evaluation === "safe")
+  const peakEvent = findPeakEvent(events)
+  const nextScenario = recommendScenario(scenario, scenarios, riskyEvents, triggerStats, defenseScore)
+  const familyBriefing = aiReport?.familyBriefing || buildFamilyBriefing({
+    scenario,
+    defenseScore,
+    goodMoves,
+    riskyMoves,
+    riskyEvents,
+    peakEvent,
+  })
   const timeline = buildTimeline(events)
   const scoreReasons = buildScoreReasons(defenseScore, goodMoves, riskyMoves, peakRisk, turns)
   const tips = buildTips(scenario, triggerStats, riskyEvents)
@@ -215,6 +231,27 @@ export function ReportDialog({
 
         <SectionTitle icon={<Sparkles className="size-4" />} title="DeepSeek 复盘总结" />
         <AiReportCard report={aiReport} loading={aiLoading} error={aiError} hasEvents={events.length > 0} />
+
+        <SectionTitle icon={<ShieldCheck className="size-4" />} title="本场关键复盘" />
+        <div className="grid gap-3 md:grid-cols-2">
+          <ResponseReviewCard
+            title="你做对了什么"
+            emptyText="本场还没有记录到明确的防御回复。下次可以练习说“我先核实一下”。"
+            events={safeEvents}
+            tone="safe"
+          />
+          <ResponseReviewCard
+            title="需要避免的回复"
+            emptyText="本场没有记录到明显的风险回复，继续保持先核实、再决定的习惯。"
+            events={riskyEvents}
+            tone="danger"
+          />
+        </div>
+
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
+          <PeakRiskCard event={peakEvent} />
+          <NextScenarioCard recommendation={nextScenario} />
+        </div>
 
         <SectionTitle icon={<ListChecks className="size-4" />} title="评分解释" />
         <div className="grid gap-2 sm:grid-cols-2">
@@ -281,6 +318,11 @@ export function ReportDialog({
           ))}
         </ul>
 
+        <SectionTitle icon={<UsersRound className="size-4" />} title="给子女 / 社区工作人员的简短说明" />
+        <div className="rounded-2xl border bg-muted/30 p-4 text-sm leading-relaxed text-foreground/90">
+          {familyBriefing}
+        </div>
+
         <div className="mt-6 flex gap-2">
           <Button className="flex-1" onClick={onClose}>
             完成
@@ -332,6 +374,83 @@ function AiReportCard({
         {report.elderAdvice}
       </div>
     </div>
+  )
+}
+
+function ResponseReviewCard({
+  title,
+  emptyText,
+  events,
+  tone,
+}: {
+  title: string
+  emptyText: string
+  events: ReportEvent[]
+  tone: "safe" | "danger"
+}) {
+  const color = tone === "safe" ? "border-safe/30 bg-safe/5 text-safe" : "border-danger/30 bg-danger/5 text-danger"
+  const displayed = events.slice(0, 3)
+
+  return (
+    <section className={cn("rounded-2xl border p-4", color)}>
+      <h3 className="font-semibold">{title}</h3>
+      {displayed.length === 0 ? (
+        <p className="mt-2 text-sm leading-relaxed text-foreground/80">{emptyText}</p>
+      ) : (
+        <ul className="mt-3 space-y-2">
+          {displayed.map((event) => (
+            <li key={`${title}-${event.turn}-${event.userText}`} className="rounded-xl bg-card/70 p-3 text-sm text-foreground/90">
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <span className="font-mono text-xs text-muted-foreground">第 {event.turn} 轮</span>
+                {event.trigger && <span className="truncate text-xs text-muted-foreground">{event.trigger}</span>}
+              </div>
+              <p className="line-clamp-2">“{event.userText}”</p>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{event.reason}</p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+function PeakRiskCard({ event }: { event: ReportEvent | null }) {
+  return (
+    <section className="rounded-2xl border border-warning/40 bg-warning/10 p-4">
+      <div className="flex items-center gap-2 text-warning-foreground">
+        <TrendingUp className="size-4" />
+        <h3 className="font-semibold">风险最高的一轮</h3>
+      </div>
+      {!event ? (
+        <p className="mt-2 text-sm leading-relaxed text-foreground/80">训练记录还不够，完成至少一轮回复后会定位最高风险点。</p>
+      ) : (
+        <div className="mt-3 rounded-xl bg-card/75 p-3 text-sm text-foreground/90">
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-mono text-xs text-muted-foreground">第 {event.turn} 轮</span>
+            <span className="text-xs font-semibold text-warning-foreground">风险变化 +{event.riskDelta.toFixed(1)}</span>
+          </div>
+          <p className="mt-2 line-clamp-2">诈骗方：{event.scammerText}</p>
+          <p className="mt-1 line-clamp-2">你的回答：{event.userText}</p>
+          <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{event.reason}</p>
+        </div>
+      )}
+    </section>
+  )
+}
+
+function NextScenarioCard({ recommendation }: { recommendation: { scenario: Scenario; reason: string } }) {
+  return (
+    <section className="rounded-2xl border border-primary/30 bg-primary/5 p-4">
+      <div className="flex items-center gap-2 text-primary">
+        <Target className="size-4" />
+        <h3 className="font-semibold">下一场建议练什么</h3>
+      </div>
+      <div className="mt-3 rounded-xl bg-card/75 p-3">
+        <p className="font-semibold text-foreground">{recommendation.scenario.title}</p>
+        <p className="mt-1 text-sm text-muted-foreground">{recommendation.scenario.persona}</p>
+        <p className="mt-2 text-sm leading-relaxed text-foreground/85">{recommendation.reason}</p>
+      </div>
+    </section>
   )
 }
 
@@ -431,6 +550,85 @@ function buildTimeline(events: ReportEvent[]) {
   const safe = events.filter((event) => event.evaluation === "safe")
   const neutral = events.filter((event) => event.evaluation === "neutral")
   return [...risky.slice(0, 4), ...safe.slice(0, 3), ...neutral.slice(0, 2)].sort((a, b) => a.turn - b.turn)
+}
+
+function findPeakEvent(events: ReportEvent[]) {
+  const [firstEvent, ...remainingEvents] = events
+  if (!firstEvent) return null
+  return remainingEvents.reduce((peak, event) => {
+    const peakWeight = riskWeight(peak)
+    const eventWeight = riskWeight(event)
+    return eventWeight > peakWeight ? event : peak
+  }, firstEvent)
+}
+
+function riskWeight(event: ReportEvent) {
+  const evaluationWeight = event.evaluation === "risky" ? 3 : event.evaluation === "mixed" ? 2 : event.evaluation === "neutral" ? 1 : 0
+  return Math.max(0, event.riskDelta) * 10 + evaluationWeight
+}
+
+function recommendScenario(
+  currentScenario: Scenario,
+  scenarios: Scenario[],
+  riskyEvents: ReportEvent[],
+  triggerStats: { name: string; count: number }[],
+  defenseScore: number,
+) {
+  const retryCurrent = riskyEvents.length >= 2 || defenseScore < 55
+  if (retryCurrent) {
+    return {
+      scenario: currentScenario,
+      reason: "本场出现了多次风险应对，建议先把这一类骗局练熟，重点练习“先核实、拒绝转账、再挂断”。",
+    }
+  }
+
+  const triggerText = triggerStats.map((item) => item.name).join(" ")
+  const targetCodes =
+    /亲情|熟人|紧急|绑架/.test(triggerText)
+      ? ["SC-06", "SC-12", "SC-14"]
+      : /健康|保健|专家/.test(triggerText)
+        ? ["SC-04", "SC-11"]
+        : /验证码|账户|征信|权威|公安|银行/.test(triggerText)
+          ? ["SC-01", "SC-13", "SC-10"]
+          : currentScenario.channel === "phone"
+            ? ["SC-02", "SC-03", "SC-08"]
+            : ["SC-01", "SC-13", "SC-04"]
+
+  const next =
+    targetCodes
+      .map((code) => scenarios.find((scenario) => scenario.code === code && scenario.id !== currentScenario.id))
+      .find((scenario): scenario is Scenario => Boolean(scenario)) ??
+    scenarios.find((scenario) => scenario.id !== currentScenario.id && scenario.difficulty === "高") ??
+    currentScenario
+
+  return {
+    scenario: next,
+    reason: next.id === currentScenario.id
+      ? "你已经完成了本场基础应对，可以再练一次，把安全回应说得更坚定、更完整。"
+      : `本场表现已具备基础防御意识，下一步建议练习“${next.title}”，扩展对不同诈骗话术的识别能力。`,
+  }
+}
+
+function buildFamilyBriefing({
+  scenario,
+  defenseScore,
+  goodMoves,
+  riskyMoves,
+  riskyEvents,
+  peakEvent,
+}: {
+  scenario: Scenario
+  defenseScore: number
+  goodMoves: number
+  riskyMoves: number
+  riskyEvents: ReportEvent[]
+  peakEvent: ReportEvent | null
+}) {
+  const performance = defenseScore >= 80 ? "防骗意识较稳" : defenseScore >= 60 ? "已具备基础防骗意识" : "仍需要重点陪练"
+  const riskNote = riskyEvents.length > 0
+    ? `出现 ${riskyMoves} 次风险倾向，${peakEvent?.trigger ? `尤其要留意“${peakEvent.trigger}”话术。` : "需要继续练习先停下再核实。"}`
+    : "未记录明显风险回复，可以继续巩固核实身份和拒绝转账的习惯。"
+  return `本次“${scenario.title}”训练中，长辈${performance}，完成了 ${goodMoves} 次有效防御回应。${riskNote} 建议子女或社区工作人员用真实生活中的简短案例陪练，并提醒老人遇到用钱决定先挂断、再通过原号码核实。`
 }
 
 function buildScoreReasons(
