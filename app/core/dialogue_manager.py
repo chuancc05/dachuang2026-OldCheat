@@ -1,5 +1,5 @@
 import time
-from typing import Iterator, List, Dict, Optional
+from typing import Any, Iterator, List, Dict, Optional
 from app.config import DEFAULT_MODEL, MAX_CONTEXT_MESSAGES, OLLAMA_URL
 from app.core.prompt_builder import PromptBuilder
 from app.core.ollama_client import OllamaClient
@@ -14,12 +14,14 @@ class DialogueManager:
         difficulty: Optional[str] = None,
         model: str = DEFAULT_MODEL,
         max_context_messages: int = MAX_CONTEXT_MESSAGES,
+        story_variant: Optional[Dict[str, Any]] = None,
     ):
         self.scene_id = scene_id
         self.difficulty = difficulty
         self.messages: List[Dict[str, str]] = []
         self.client = OllamaClient(base_url=OLLAMA_URL, model=model)
         self.max_context_messages = max(2, max_context_messages)
+        self.story_variant = story_variant
         
         # 记录会话开始时间和最后一次安全提示时间
         self.start_time = time.time()
@@ -31,7 +33,7 @@ class DialogueManager:
 
     def _initialize_system_prompt(self) -> None:
         """初始化系统提示词并加入消息记录"""
-        prompt = PromptBuilder.build_system_prompt(self.scene_id, self.difficulty)
+        prompt = PromptBuilder.build_system_prompt(self.scene_id, self.difficulty, self.story_variant)
         self.messages.append({"role": "system", "content": prompt})
 
     def is_emergency_stop(self, user_input: str) -> bool:

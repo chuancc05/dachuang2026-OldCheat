@@ -18,6 +18,7 @@ import gradio as gr
 from app.config import DATA_DIR, WHISPER_MODEL
 from app.core import DialogueManager, SCENES
 from app.core.material_library import choose_material_reply
+from app.core.story_variants import choose_story_variant
 from app.database import db
 from app.psychology import DIMENSIONS, FraudDetector, PsychologyAnalyzer, ScoreTracker
 from app.report.pdf_generator import PDFReportGenerator
@@ -208,10 +209,13 @@ def _advice_markdown(state: Dict[str, Any]) -> str:
     return "<div class='advice-list'>" + "".join(rows) + "</div>"
 
 
-def _fallback_ai_reply(scene_id: str, user_text: str) -> str:
+def _fallback_ai_reply(scene_id: str, user_text: str, story_variant: Dict[str, Any] | None = None, round_number: int = 1) -> str:
     scene = SCENES[scene_id]
     if any(word in user_text for word in ["骗子", "报警", "不信", "挂了", "核实"]):
         return "您的警惕性很强。训练到这里可以停一下：遇到可疑要求，先挂断并通过官方渠道核实。"
+    variant_fallback = story_variant.get("fallbackLines", []) if story_variant else []
+    if variant_fallback:
+        return str(variant_fallback[(max(1, round_number) - 1) % len(variant_fallback)])
     material_reply = choose_material_reply(scene_id, user_text)
     if material_reply:
         return material_reply
@@ -222,7 +226,9 @@ def _fallback_ai_reply(scene_id: str, user_text: str) -> str:
     return f"您先别着急，我这里是{scene.name}相关的专员。这个机会有时间限制，请您先按我说的确认一下。"
 
 
-def _initial_ai_message(scene_id: str) -> str:
+def _initial_ai_message(scene_id: str, story_variant: Dict[str, Any] | None = None) -> str:
+    if story_variant and str(story_variant.get("opening", "")).strip():
+        return str(story_variant["opening"]).strip()
     scene = SCENES.get(scene_id)
     if scene and scene.openings:
         return random.choice(scene.openings)
@@ -313,11 +319,13 @@ def _finalize_training(
 
     generate_radar_chart(named_scores, str(radar_path))
     scene_definition = SCENES[state["scene_id"]]
-    summary = f"{analysis} 本次训练共进行 {state['round']} 轮对话，综合风险评分为 {state['tracker'].get_composite_score():.1f}/10。"
+    story_variant = state.get("story_variant")
+    variant_summary = f"本轮故事变体为“{story_variant.get('title')}”，模拟人物为“{story_variant.get('persona')}”。" if story_variant else ""
+    summary = f"{variant_summary}{analysis} 本次训练共进行 {state['round']} 轮对话，综合风险评分为 {state['tracker'].get_composite_score():.1f}/10。"
     report_path = PDFReportGenerator().generate_report(
         output_path=str(pdf_path),
         user_name="本地用户",
-        scene=scene_definition.name,
+        scene=f"{scene_definition.name} · {story_variant.get('title')}" if story_variant else scene_definition.name,
         summary=summary,
         radar_chart_path=str(radar_path),
         dimension_scores=scores,
@@ -338,27 +346,29 @@ def start_training(scene_label: str, difficulty: str) -> Tuple[Dict[str, Any], L
     _ensure_db()
     scene_id = _scene_id_from_label(scene_label)
     scene = SCENES[scene_id]
+    story_variant = choose_story_variant(scene_id)
     user = db.get_or_create_user("本地用户")
     training_session = db.create_session(
         user_id=user.id,
-        topic=scene.name,
+        topic=f"{scene.name} · {story_variant.get('title')}" if story_variant else scene.name,
         scene_type=scene_id,
         difficulty=difficulty,
     )
     state = _new_empty_state()
     state.update(
         {
-            "manager": DialogueManager(scene_id=scene_id, difficulty=difficulty),
+            "manager": DialogueManager(scene_id=scene_id, difficulty=difficulty, story_variant=story_variant),
             "session_id": training_session.id,
             "scene_id": scene_id,
             "difficulty": difficulty,
+            "story_variant": story_variant,
         }
     )
     opening = (
         f"已进入“{scene.name}”训练。请在下方输入或使用语音识别提交回复。"
         "训练中您可以随时说“停止训练”结束。"
     )
-    first_ai_text = _initial_ai_message(scene_id)
+    first_ai_text = _initial_ai_message(scene_id, story_variant)
     state["manager"].messages.append({"role": "assistant", "content": first_ai_text})
     state["last_ai_text"] = first_ai_text
     db.add_dialogue_turn(state["session_id"], "ai", first_ai_text, 0)
@@ -411,7 +421,7 @@ def send_message(
         yield chat_history, "", _risk_markdown(state["tracker"].get_composite_score()), _top_dimensions_markdown(state), _advice_markdown(state), None, "AI 正在回复。", state, _progress_html(state), _scene_header_html(state)
 
     if "[连接错误" in full_response or "[发生错误" in full_response:
-        full_response = _fallback_ai_reply(state["scene_id"], clean_text)
+        full_response = _fallback_ai_reply(state["scene_id"], clean_text, state.get("story_variant"), round_number)
         manager.messages[-1]["content"] = full_response
         chat_history[-1][1] = full_response
 

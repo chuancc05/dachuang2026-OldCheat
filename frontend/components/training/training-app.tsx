@@ -6,7 +6,7 @@ import { SimulationStage, type Message } from "@/components/training/simulation-
 import { CoachPanel } from "@/components/training/coach-panel"
 import { type RagDebugInfo } from "@/components/training/rag-debug-panel"
 import { ReplyBar } from "@/components/training/reply-bar"
-import { ReportDialog, type ReportEvent, type ReportEvaluation } from "@/components/training/report-dialog"
+import { ReportDialog, type ReportEvaluation } from "@/components/training/report-dialog"
 import { MobileTrainingFlow } from "@/components/training/mobile-training-flow"
 import {
   VoiceCallPanel,
@@ -15,6 +15,15 @@ import { Button } from "@/components/ui/button"
 import { DEFAULT_ADVICE, type AiSource, useTrainingSession } from "@/hooks/use-training-session"
 import { getSpeechRecognitionConstructor, useVoiceTraining } from "@/hooks/use-voice-training"
 import { evaluateReply, type Scenario } from "@/lib/scenarios"
+import {
+  applyStoryVariant,
+  completeStoryVariant,
+  readVariantHistory,
+  readWeakVariantHistory,
+  rememberStoryVariant,
+  selectStoryVariant,
+  type StoryVariant,
+} from "@/lib/story-variants"
 import { splitSpeechCue } from "@/lib/speech-text"
 import { RealtimeVoiceClient } from "@/lib/voice/realtime-voice-client"
 import {
@@ -169,7 +178,7 @@ function lastScammerText(messages: Message[], scenario: Scenario, turnIndex: num
 let idc = 0
 const nextId = () => `m-${idc++}`
 
-export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
+export function TrainingApp({ scenarios, variants: initialVariants }: { scenarios: Scenario[]; variants: StoryVariant[] }) {
   const isMobileViewport = useMobileViewport()
   const session = useTrainingSession(scenarios[0] ?? null)
   const {
@@ -193,6 +202,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     lastRagDebug,
     reportEvents,
     defenseScore,
+    setScenario,
     setStarted,
     setFinished,
     setMessages,
@@ -210,6 +220,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     bumpRisk,
     resetSession: resetSessionState,
   } = session
+  const [variants, setVariants] = useState(initialVariants)
   const voice = useVoiceTraining()
   const {
     voicePanelOpen,
@@ -245,6 +256,20 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
   } = voice
 
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const preparedScenarioRef = useRef<Scenario | null>(null)
+  const completedVariantRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (initialVariants.length === 0) return
+    let cancelled = false
+    fetch("/api/story-variants", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`variant route returned ${response.status}`)))
+      .then((data) => {
+        if (!cancelled && Array.isArray(data.variants) && data.variants.length > 0) setVariants(data.variants)
+      })
+      .catch((error) => console.warn("Story variant overlay unavailable; using bundled seeds.", error))
+    return () => { cancelled = true }
+  }, [initialVariants.length])
 
   useEffect(() => {
     finishedRef.current = finished
@@ -255,9 +280,37 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
 
   const resetSession = useCallback((nextScenario: Scenario | null) => {
     if (timeoutRef.current) clearTimeout(timeoutRef.current)
-    resetSessionState(nextScenario)
+    preparedScenarioRef.current = null
+    completedVariantRef.current = null
+    const baseScenario = nextScenario ? scenarios.find((item) => item.code === nextScenario.code) ?? nextScenario : null
+    resetSessionState(baseScenario)
     resetVoiceTraining()
-  }, [resetSessionState, resetVoiceTraining])
+  }, [resetSessionState, resetVoiceTraining, scenarios])
+
+  const prepareSessionScenario = useCallback((candidate: Scenario): Scenario => {
+    if (candidate.variant) return candidate
+    if (preparedScenarioRef.current?.code === candidate.code) return preparedScenarioRef.current
+    const baseScenario = scenarios.find((item) => item.code === candidate.code) ?? candidate
+    const selected = selectStoryVariant(
+      variants,
+      baseScenario.code,
+      readVariantHistory(baseScenario.code),
+      Math.random,
+      readWeakVariantHistory(baseScenario.code),
+    )
+    const prepared = selected ? applyStoryVariant(baseScenario, selected) : baseScenario
+    preparedScenarioRef.current = prepared
+    setScenario(prepared)
+    if (selected) rememberStoryVariant(selected)
+    return prepared
+  }, [scenarios, setScenario, variants])
+
+  useEffect(() => {
+    const variant = scenario?.variant
+    if (!finished || !variant || completedVariantRef.current === variant.id) return
+    completeStoryVariant(variant, { defenseScore, goodMoves, riskyMoves })
+    completedVariantRef.current = variant.id
+  }, [defenseScore, finished, goodMoves, riskyMoves, scenario])
 
   const revealScammerLine = useCallback(
     (index: number, activeScenario: Scenario) => {
@@ -290,9 +343,10 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
 
   const handleStart = useCallback(() => {
     if (!scenario) return
+    const activeScenario = prepareSessionScenario(scenario)
     setStarted(true)
-    revealScammerLine(0, scenario)
-  }, [scenario, revealScammerLine])
+    revealScammerLine(0, activeScenario)
+  }, [scenario, prepareSessionScenario, revealScammerLine])
 
   const totalTurns = scenario ? scenario.script.length : 0
   const progress = totalTurns ? Math.min(scammerShown, totalTurns) : 0
@@ -613,6 +667,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
 
   const handleStartBrowserVoice = useCallback(async () => {
     if (!scenario) return
+    const activeScenario = prepareSessionScenario(scenario)
 
     setVoicePanelOpen(true)
     setVoiceProvider("browser")
@@ -649,7 +704,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     }
 
     if (!started) {
-      const firstTurn = scenario.script[0]
+      const firstTurn = activeScenario.script[0]
       if (!firstTurn) {
         voiceLoopRef.current = false
         setVoiceStatus("error")
@@ -676,11 +731,12 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     }
 
     speakScammerLine(lastScammerText(messages, scenario, scammerShown))
-  }, [scenario, started, finished, typing, messages, scammerShown, bumpRisk, speakScammerLine])
+  }, [scenario, started, finished, typing, messages, scammerShown, bumpRisk, speakScammerLine, prepareSessionScenario])
 
   const handleStartRealtimeVoice = useCallback(async () => {
     if (!scenario) return false
-    const scenarioVoice = getScenarioVoice(scenario)
+    const activeScenario = prepareSessionScenario(scenario)
+    const scenarioVoice = getScenarioVoice(activeScenario)
     if (typing) {
       setVoicePanelOpen(true)
       setVoiceStatus("paused")
@@ -773,7 +829,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
       client.setMuted(voiceMuted)
 
       if (!started) {
-        const firstTurn = scenario.script[0]
+        const firstTurn = activeScenario.script[0]
         if (!firstTurn) {
           voiceLoopRef.current = false
           realtimeVoiceRef.current = false
@@ -792,7 +848,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
         setAdvice(firstTurn.coach)
         setLastAiSource("fallback")
         if (firstTurn.trigger) setTriggers((items) => [...items, firstTurn.trigger as string])
-        const firstAudioTurn = createAudioTurn(scenario, firstTurn.line, 0)
+        const firstAudioTurn = createAudioTurn(activeScenario, firstTurn.line, 0)
         lastSpokenLineRef.current = firstAudioTurn.line
         lastSpokenTurnRef.current = firstAudioTurn
         await client.playSequence(buildVoicePlaybackSegments(firstAudioTurn, scenarioVoice.voice))
@@ -822,6 +878,7 @@ export function TrainingApp({ scenarios }: { scenarios: Scenario[] }) {
     stopBrowserVoice,
     stopRealtimeVoice,
     voiceMuted,
+    prepareSessionScenario,
   ])
 
   const handleStartVoice = useCallback(async () => {

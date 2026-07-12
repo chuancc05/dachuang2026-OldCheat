@@ -80,7 +80,7 @@ export function ReplyBar({
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
-                if ((e.nativeEvent as any).isComposing || e.keyCode === 229) return
+                if (e.nativeEvent.isComposing || e.keyCode === 229) return
                 e.preventDefault()
                 submit()
               }

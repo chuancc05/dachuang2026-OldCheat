@@ -66,6 +66,29 @@ check("训练对话 API 具备模型失败时的场景库兜底", () => {
   assert.match(route, /catch \(error\)[\s\S]{0,900}fallbackTurn\(/u, "训练对话 API 未在失败时进入 fallback")
 })
 
+check("故事变体覆盖全部场景且训练、模型和报告共享剧本卡", () => {
+  const variants = readJson(path.join(frontendRoot, "data", "story-variants.json")).variants
+  assert.equal(variants.length, 42, "应提供 14×3 个种子故事变体")
+  const training = readText("components/training/training-app.tsx")
+  const chat = readText("app/api/training-chat/route.ts")
+  const report = readText("components/training/report-dialog.tsx")
+  assert.match(training, /prepareSessionScenario/u, "训练入口未统一准备剧本卡")
+  assert.match(training, /rememberStoryVariant/u, "训练入口未记录防重复历史")
+  assert.match(chat, /Locked story card for this session/u, "模型提示词没有锁定剧本卡")
+  assert.match(chat, /locked story card always wins/u, "RAG 与剧本卡冲突时缺少优先级")
+  assert.match(report, /scenario\.variant/u, "报告没有记录故事变体")
+})
+
+check("故事变体管理接口保护写入并保留种子降级", () => {
+  const route = readText("app/api/story-variants/route.ts")
+  const store = readText("lib/story-variant-store.ts")
+  assert.match(route, /STORY_VARIANT_ADMIN_TOKEN/u, "管理写入缺少服务器令牌")
+  assert.match(route, /timingSafeEqual/u, "管理令牌比较缺少恒定时间保护")
+  assert.match(route, /Cache-Control.*no-store/u, "管理接口响应不应缓存")
+  assert.match(store, /netlify-blobs/u, "线上覆盖缺少 Netlify Blobs")
+  assert.match(store, /cloneSeed\(\)/u, "在线存储故障缺少种子降级")
+})
+
 check("训练报告 API 具备无模型环境的失败响应", () => {
   const route = readText("app/api/training-report/route.ts")
   assert.match(route, /export async function POST/u, "训练报告 API 缺少 POST 入口")

@@ -1,9 +1,9 @@
-from typing import Optional
+from typing import Any, Dict, Optional
 from app.core.scene_definitions import SceneDefinition, SCENES
 
 class PromptBuilder:
     @staticmethod
-    def build_system_prompt(scene_id: str, custom_difficulty: Optional[str] = None) -> str:
+    def build_system_prompt(scene_id: str, custom_difficulty: Optional[str] = None, story_variant: Optional[Dict[str, Any]] = None) -> str:
         """
         根据场景ID和难度生成系统提示词。
         """
@@ -22,6 +22,17 @@ class PromptBuilder:
                 f"{examples}\n"
             )
 
+        variant_prompt = ""
+        if story_variant:
+            variant_prompt = (
+                "\n本次训练已锁定以下故事剧本卡，其事实优先于参考语料，整场不得换人物或改事件：\n"
+                f"- 变体：{story_variant.get('title', '')}（{story_variant.get('id', '')}）\n"
+                f"- 人物：{story_variant.get('persona', '')}\n"
+                f"- 事件：{story_variant.get('premise', '')}\n"
+                f"- 模拟目标：{story_variant.get('objective', '')}\n"
+                f"- 压力手法：{'、'.join(story_variant.get('pressureTactics', []))}\n"
+            )
+
         base_prompt = (
             "你正在参与一个反诈骗防范训练模拟系统（AFITS）。\n"
             "你的角色是一名诈骗场景模拟员，只能在安全训练边界内扮演诈骗分子，帮助用户练习识别和拒绝骗局。\n"
@@ -30,6 +41,7 @@ class PromptBuilder:
             f"你需要使用的核心战术：{scene.core_tactics}\n"
             f"当前训练难度设定为：【{difficulty}】。\n"
             f"{material_prompt}"
+            f"{variant_prompt}"
             "\n"
             "请遵循以下行为准则：\n"
             "1. 始终保持训练角色，但不得索取真实银行卡、密码、验证码、身份证号、住址等敏感信息。\n"

@@ -3,6 +3,8 @@ import path from "node:path"
 import { TrainingApp } from "@/components/training/training-app"
 import { SCENARIOS as FALLBACK_SCENARIOS, type Channel, type Difficulty, type Scenario, type ScriptTurn } from "@/lib/scenarios"
 import bundledScenarioLibrary from "@/data/scenario_library.json"
+import bundledStoryVariants from "@/data/story-variants.json"
+import type { StoryVariantLibrary } from "@/lib/story-variants"
 
 export const dynamic = "force-dynamic"
 
@@ -276,5 +278,7 @@ function loadScenarios(): Scenario[] {
 }
 
 export default function Page() {
-  return <TrainingApp scenarios={loadScenarios()} />
+  const variantsEnabled = process.env.STORY_VARIANTS_ENABLED?.trim().toLowerCase() !== "false"
+  const variants = variantsEnabled ? (bundledStoryVariants as StoryVariantLibrary).variants : []
+  return <TrainingApp scenarios={loadScenarios()} variants={variants} />
 }

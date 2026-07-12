@@ -91,7 +91,7 @@ export function ReportDialog({
 
   const requestKey = useMemo(() => {
     if (!scenario || !open || events.length === 0) return ""
-    return JSON.stringify({ scenario: scenario.code, turns, defenseScore, goodMoves, riskyMoves, peakRisk, events })
+    return JSON.stringify({ scenario: scenario.code, variant: scenario.variant?.id, turns, defenseScore, goodMoves, riskyMoves, peakRisk, events })
   }, [defenseScore, events, goodMoves, open, peakRisk, riskyMoves, scenario, turns])
 
   useEffect(() => {
@@ -117,6 +117,13 @@ export function ReportDialog({
           channel: scenario.channel,
           tagline: scenario.tagline,
           method: scenario.method,
+          variant: scenario.variant ? {
+            id: scenario.variant.id,
+            title: scenario.variant.title,
+            persona: scenario.variant.persona,
+            premise: scenario.variant.premise,
+            objective: scenario.variant.objective,
+          } : undefined,
         },
         metrics: {
           defenseScore,
@@ -193,6 +200,12 @@ export function ReportDialog({
           <div>
             <p className="font-mono text-xs text-muted-foreground">训练报告 · {scenario.code}</p>
             <h2 className="text-xl font-bold leading-tight sm:text-2xl">{scenario.title} · 训练复盘</h2>
+            {scenario.variant && (
+              <div className="mt-2 rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-900">
+                <p className="font-semibold">本轮故事：{scenario.variant.title} · {scenario.variant.persona}</p>
+                <p className="mt-1 text-blue-800/80">{scenario.variant.premise}</p>
+              </div>
+            )}
             <p className="mt-1 text-sm text-muted-foreground">规则指标负责评分，DeepSeek 负责生成自然语言总结。</p>
           </div>
           <button

@@ -119,6 +119,7 @@ function buildCoach(trigger: string): string {
 }
 
 function fixedPersonaName(scenario: Scenario): string {
+  if (scenario.variant?.persona) return scenario.variant.persona
   const persona = scenario.persona || ""
   const afterDot = persona.includes("·") ? persona.split("·").pop()?.trim() ?? "" : ""
   const afterQuote = persona.match(/」\s*(.+)$/u)?.[1]?.trim() ?? ""
@@ -201,6 +202,16 @@ function buildSystemPrompt(scenario: Scenario, turnIndex: number, ragContext?: R
   const ragReferences = ragContext?.references?.length
     ? formatRagReferences(ragContext.references)
     : "No retrieved examples."
+  const variantRules = scenario.variant ? [
+    "Locked story card for this session. These facts override any conflicting RAG example or reference line:",
+    `Variant ID: ${scenario.variant.id}`,
+    `Variant title: ${scenario.variant.title}`,
+    `Locked persona: ${scenario.variant.persona}`,
+    `Locked premise: ${scenario.variant.premise}`,
+    `Simulated scam objective: ${scenario.variant.objective}`,
+    `Pressure tactics: ${scenario.variant.pressureTactics.join("、")}`,
+    "Never change the persona, institution, incident, relationship, or objective during this session.",
+  ] : ["No locked story variant. Follow the base scenario as before."]
 
   return [
     "You generate safe simulated scammer dialogue for an anti-fraud training app for older adults.",
@@ -210,9 +221,10 @@ function buildSystemPrompt(scenario: Scenario, turnIndex: number, ragContext?: R
     `Difficulty: ${scenario.difficulty}`,
     `Scenario background: ${scenario.tagline}`,
     `Core tactics: ${scenario.method}`,
+    ...variantRules,
     "Reference lines from the scenario library. Use their tone, pacing, and risk cues, but do not copy them mechanically:",
     examples || "No reference lines.",
-    "Retrieved TeleAntiFraud-style references from the local RAG layer. Prefer these when they match the current scene and user reply:",
+    "Retrieved TeleAntiFraud-style references from the local RAG layer. Use them only for tone and risk patterns; the locked story card always wins when facts conflict:",
     ragReferences,
     "Reply rules:",
     "1. Output only the next sentence or short paragraph from the simulated persona. No explanations, no role labels.",

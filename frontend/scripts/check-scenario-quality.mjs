@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url"
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const frontendRoot = path.resolve(scriptDir, "..")
 const scenarioLibraryPath = path.join(frontendRoot, "data", "scenario_library.json")
+const storyVariantLibraryPath = path.join(frontendRoot, "data", "story-variants.json")
 const pagePath = path.join(frontendRoot, "app", "page.tsx")
 const voicesPath = path.join(frontendRoot, "lib", "voice", "scenario-voices.ts")
 const strict = process.argv.includes("--strict")
@@ -84,6 +85,7 @@ function hasIdentityIntro(text) {
 }
 
 const library = readJson(scenarioLibraryPath)
+const storyVariantLibrary = readJson(storyVariantLibraryPath)
 const personas = parsePersonas(fs.readFileSync(pagePath, "utf8"))
 const voices = parseVoiceLabels(fs.readFileSync(voicesPath, "utf8"))
 const errors = []
@@ -97,6 +99,16 @@ if ((library.scenes ?? []).length !== EXPECTED_CODES.length) {
 
 for (const code of EXPECTED_CODES) {
   const scene = sceneByCode.get(code)
+  const storyVariants = (storyVariantLibrary.variants ?? []).filter((variant) => variant.scenarioCode === code && variant.enabled)
+  if (storyVariants.length < 3) addIssue(errors, "error", code, "story-variant-count", `至少需要 3 个已启用故事变体，当前 ${storyVariants.length} 个。`)
+  for (const variant of storyVariants) {
+    for (const field of ["id", "title", "persona", "source", "premise", "objective", "opening"]) {
+      if (!normalize(variant[field])) addIssue(errors, "error", code, "story-variant-field", `${variant.id ?? "未知变体"} 缺少 ${field}。`)
+    }
+    const variantText = [variant.opening, ...(variant.fallbackLines ?? [])].join(" ")
+    if (SENSITIVE_PATTERN.test(variantText)) addIssue(errors, "error", code, "story-variant-sensitive", `${variant.id} 疑似包含真实联系方式、链接或账号。`)
+    if (!Array.isArray(variant.fallbackLines) || variant.fallbackLines.length < 1) addIssue(errors, "error", code, "story-variant-fallback", `${variant.id} 缺少 fallback 话术。`)
+  }
   if (!scene) {
     addIssue(errors, "error", code, "missing-scene", "动态场景库中缺少该场景。")
     continue

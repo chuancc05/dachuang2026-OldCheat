@@ -1,3 +1,5 @@
+import type { StoryVariant } from "@/lib/story-variants"
+
 export type Difficulty = "低" | "中" | "高"
 export type Channel = "phone" | "wechat"
 
@@ -29,6 +31,8 @@ export interface Scenario {
   /** 场景核心套路 */
   method: string
   script: ScriptTurn[]
+  /** 本轮训练锁定的故事变体；旧场景和旧请求可不提供。 */
+  variant?: StoryVariant
 }
 
 export const SCENARIOS: Scenario[] = [

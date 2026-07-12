@@ -17,4 +17,5 @@ data/matplotlib/
 data/reports/
 
 .pnpm-store/
+.data/
 !frontend/.env.example
