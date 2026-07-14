@@ -7,6 +7,7 @@ import { Activity, Lightbulb, FileText, ShieldCheck, TriangleAlert, Award } from
 import { Button } from "@/components/ui/button"
 import { RagDebugPanel, type RagDebugInfo } from "./rag-debug-panel"
 import { RuntimeStatusPanel } from "./runtime-status-panel"
+import type { VoiceProvider } from "./voice-call-panel"
 
 interface CoachPanelProps {
   risk: number
@@ -21,6 +22,7 @@ interface CoachPanelProps {
   ragDebugEnabled?: boolean
   ragDebug?: RagDebugInfo | null
   aiSource?: "idle" | "deepseek" | "ollama" | "fallback"
+  voiceProvider?: VoiceProvider
 }
 
 export function CoachPanel({
@@ -36,6 +38,7 @@ export function CoachPanel({
   ragDebugEnabled = false,
   ragDebug = null,
   aiSource = "idle",
+  voiceProvider = "unavailable",
 }: CoachPanelProps) {
   const { tone } = riskLevel(risk)
   const toneRing = {
@@ -94,7 +97,7 @@ export function CoachPanel({
         <p className="text-sm leading-relaxed text-foreground/90 text-pretty">{advice}</p>
       </div>
 
-      <RuntimeStatusPanel aiSource={aiSource} ragDebug={ragDebug} />
+      <RuntimeStatusPanel aiSource={aiSource} ragDebug={ragDebug} voiceProvider={voiceProvider} />
 
       {ragDebugEnabled && <RagDebugPanel info={ragDebug} />}
 

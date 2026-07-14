@@ -28,6 +28,9 @@ type BrowserAudioContext = typeof AudioContext
 const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:8787/voice"
 const ASR_SAMPLE_RATE = 16000
 const TTS_SAMPLE_RATE = 24000
+const INPUT_BUFFER_SIZE = 2048
+const TTS_START_BUFFER_SECONDS = 0.12
+const TTS_MIN_CHUNK_LEAD_SECONDS = 0.03
 
 export class RealtimeVoiceClient {
   private readonly url: string
@@ -233,7 +236,7 @@ export class RealtimeVoiceClient {
     })
     this.inputContext = new AudioContextCtor({ sampleRate: ASR_SAMPLE_RATE })
     this.sourceNode = this.inputContext.createMediaStreamSource(this.stream)
-    this.processorNode = this.inputContext.createScriptProcessor(4096, 1, 1)
+    this.processorNode = this.inputContext.createScriptProcessor(INPUT_BUFFER_SIZE, 1, 1)
     const inputRate = this.inputContext.sampleRate
 
     this.processorNode.onaudioprocess = (event) => {
@@ -273,7 +276,11 @@ export class RealtimeVoiceClient {
     const source = context.createBufferSource()
     source.buffer = buffer
     source.connect(this.outputGain ?? context.destination)
-    const startAt = Math.max(this.nextPlayTime, context.currentTime + 0.02)
+    const minimumStart = context.currentTime + TTS_MIN_CHUNK_LEAD_SECONDS
+    if (this.nextPlayTime <= context.currentTime || this.nextPlayTime - context.currentTime > 1.5) {
+      this.nextPlayTime = context.currentTime + TTS_START_BUFFER_SECONDS
+    }
+    const startAt = Math.max(this.nextPlayTime, minimumStart)
     source.start(startAt)
     this.nextPlayTime = startAt + buffer.duration
   }

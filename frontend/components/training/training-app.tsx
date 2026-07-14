@@ -1086,6 +1086,7 @@ export function TrainingApp({ scenarios, variants: initialVariants }: { scenario
             ragDebugEnabled={ragDebugEnabled}
             ragDebug={lastRagDebug}
             aiSource={lastAiSource}
+            voiceProvider={voiceProvider}
           />
         </div>
       </div>

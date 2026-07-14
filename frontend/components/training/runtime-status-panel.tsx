@@ -1,9 +1,10 @@
 "use client"
 
 import { useCallback, useEffect, useState } from "react"
-import { Bot, DatabaseZap, RefreshCw, Radio, ShieldCheck, TriangleAlert } from "lucide-react"
+import { Bot, DatabaseZap, Radio, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import type { RagDebugInfo } from "@/components/training/rag-debug-panel"
+import type { VoiceProvider } from "@/components/training/voice-call-panel"
 
 type AiSource = "idle" | "deepseek" | "ollama" | "fallback"
 
@@ -39,7 +40,43 @@ const RAG_MODE_LABEL: Record<RuntimeStatus["rag"]["mode"], string> = {
   off: "未启用",
 }
 
-export function RuntimeStatusPanel({ aiSource, ragDebug }: { aiSource: AiSource; ragDebug: RagDebugInfo | null }) {
+function voiceStatusCopy(status: RuntimeStatus | null, provider: VoiceProvider) {
+  if (provider === "dashscope" || provider === "aliyun") {
+    return {
+      value: "阿里云实时语音已连接",
+      detail: "当前会话正在使用公网 WSS 网关",
+    }
+  }
+
+  if (provider === "browser") {
+    return {
+      value: "浏览器语音",
+      detail: "当前会话使用浏览器 ASR/TTS",
+    }
+  }
+
+  if (status?.voice.mode === "gateway") {
+    return {
+      value: "实时语音网关已配置",
+      detail: "开始语音训练后会尝试连接",
+    }
+  }
+
+  return {
+    value: "浏览器语音优先",
+    detail: "网关不可用时保留文字训练",
+  }
+}
+
+export function RuntimeStatusPanel({
+  aiSource,
+  ragDebug,
+  voiceProvider,
+}: {
+  aiSource: AiSource
+  ragDebug: RagDebugInfo | null
+  voiceProvider: VoiceProvider
+}) {
   const [status, setStatus] = useState<RuntimeStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
@@ -65,6 +102,7 @@ export function RuntimeStatusPanel({ aiSource, ragDebug }: { aiSource: AiSource;
   const displayedAi = aiSource === "idle" ? status?.ai.preferredSource : aiSource
   const displayedRagMode = ragDebug?.mode ?? status?.rag.mode
   const ragUsesFallback = ragDebug?.mode === "lexical" || Boolean(ragDebug?.error)
+  const voiceCopy = voiceStatusCopy(status, voiceProvider)
 
   return (
     <section className="rounded-2xl border border-primary/25 bg-primary/5 p-4">
@@ -83,7 +121,9 @@ export function RuntimeStatusPanel({ aiSource, ragDebug }: { aiSource: AiSource;
       </div>
 
       {failed ? (
-        <p className="mt-2 text-xs leading-relaxed text-muted-foreground">状态检查暂不可用，训练仍会保留场景库和文字训练兜底。</p>
+        <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+          状态检查暂不可用，训练仍会保留场景库和文字训练兜底。
+        </p>
       ) : (
         <div className="mt-3 space-y-2 text-xs">
           <StatusRow icon={<Bot className="size-3.5" />} label="本轮 AI" value={displayedAi ? AI_LABEL[displayedAi] : "正在检查"} />
@@ -91,14 +131,15 @@ export function RuntimeStatusPanel({ aiSource, ragDebug }: { aiSource: AiSource;
             icon={<DatabaseZap className="size-3.5" />}
             label="RAG 检索"
             value={displayedRagMode ? RAG_MODE_LABEL[displayedRagMode] : "正在检查"}
-            detail={ragUsesFallback ? "向量服务异常，已切换关键词兜底" : status?.rag.mode === "vector" ? `${status.rag.provider === "dashscope" ? "DashScope" : "本地"} 向量` : undefined}
+            detail={
+              ragUsesFallback
+                ? "向量服务异常，已切换关键词兜底"
+                : status?.rag.mode === "vector"
+                  ? `${status.rag.provider === "dashscope" ? "DashScope" : "本地"} 向量`
+                  : undefined
+            }
           />
-          <StatusRow
-            icon={<Radio className="size-3.5" />}
-            label="语音通话"
-            value={status?.voice.mode === "gateway" ? "实时语音网关" : "浏览器语音优先"}
-            detail="不可用时保留文字训练"
-          />
+          <StatusRow icon={<Radio className="size-3.5" />} label="语音通话" value={voiceCopy.value} detail={voiceCopy.detail} />
         </div>
       )}
     </section>
