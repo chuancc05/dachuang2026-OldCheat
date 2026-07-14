@@ -5,6 +5,8 @@ import type { VoiceCallStatus, VoiceProvider, VoiceTranscript } from "@/componen
 import { RealtimeVoiceClient } from "@/lib/voice/realtime-voice-client"
 import type { AudioCue, AudioTurn } from "@/lib/voice/scenario-audio"
 
+export type RealtimeTurnGate = "scammer-speaking" | "listening-user" | "submitted" | "finished"
+
 export type BrowserSpeechRecognitionEvent = {
   resultIndex: number
   results: {
@@ -56,6 +58,8 @@ export function useVoiceTraining() {
   const voiceLoopRef = useRef(false)
   const realtimeVoiceRef = useRef(false)
   const realtimeSubmittingRef = useRef(false)
+  // Keeps delayed ASR events from a previous phase from advancing the training.
+  const realtimeTurnGateRef = useRef<RealtimeTurnGate>("finished")
   const finishedRef = useRef(false)
   const transcriptRef = useRef("")
   const transcriptConfidenceRef = useRef<number | undefined>(undefined)
@@ -75,6 +79,7 @@ export function useVoiceTraining() {
 
   const stopRealtimeVoice = useCallback(() => {
     realtimeVoiceRef.current = false
+    realtimeTurnGateRef.current = "finished"
     realtimeClientRef.current?.close()
     realtimeClientRef.current = null
   }, [])
@@ -82,6 +87,7 @@ export function useVoiceTraining() {
   const resetVoiceTraining = useCallback(() => {
     voiceLoopRef.current = false
     realtimeSubmittingRef.current = false
+    realtimeTurnGateRef.current = "finished"
     stopRealtimeVoice()
     stopBrowserVoice()
     setVoicePanelOpen(false)
@@ -99,6 +105,7 @@ export function useVoiceTraining() {
 
   const finishVoiceTraining = useCallback(() => {
     voiceLoopRef.current = false
+    realtimeTurnGateRef.current = "finished"
     stopRealtimeVoice()
     stopBrowserVoice()
     setVoiceStatus("finished")
@@ -129,6 +136,7 @@ export function useVoiceTraining() {
     voiceLoopRef,
     realtimeVoiceRef,
     realtimeSubmittingRef,
+    realtimeTurnGateRef,
     finishedRef,
     transcriptRef,
     transcriptConfidenceRef,

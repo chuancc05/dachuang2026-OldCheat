@@ -235,6 +235,7 @@ export function TrainingApp({ scenarios, variants: initialVariants }: { scenario
     voiceLoopRef,
     realtimeVoiceRef,
     realtimeSubmittingRef,
+    realtimeTurnGateRef,
     finishedRef,
     transcriptRef,
     transcriptConfidenceRef,
@@ -755,15 +756,21 @@ export function TrainingApp({ scenarios, variants: initialVariants }: { scenario
     const client = new RealtimeVoiceClient({
       url: VOICE_GATEWAY_URL,
       onPartial: (text) => {
-        if (!realtimeVoiceRef.current || !text.trim()) return
+        if (realtimeTurnGateRef.current !== "listening-user" || !realtimeVoiceRef.current || !text.trim()) return
         setVoiceTranscript({ text: text.trim(), provider: "dashscope" })
       },
       onFinal: (text) => {
         const transcript = text.trim()
-        if (!realtimeVoiceRef.current || !transcript || realtimeSubmittingRef.current) return
+        if (
+          realtimeTurnGateRef.current !== "listening-user" ||
+          !realtimeVoiceRef.current ||
+          !transcript ||
+          realtimeSubmittingRef.current
+        ) return
 
+        realtimeTurnGateRef.current = "submitted"
         realtimeSubmittingRef.current = true
-        client.stopListening(false)
+        client.stopListening(true)
         setVoiceTranscript({ text: transcript, provider: "dashscope" })
         setVoiceStatus("thinking")
 
@@ -778,11 +785,13 @@ export function TrainingApp({ scenarios, variants: initialVariants }: { scenario
             } else {
               voiceLoopRef.current = false
               realtimeVoiceRef.current = false
+              realtimeTurnGateRef.current = "finished"
               setVoiceStatus("paused")
             }
           } catch (error) {
             voiceLoopRef.current = false
             realtimeVoiceRef.current = false
+            realtimeTurnGateRef.current = "finished"
             setVoiceStatus("error")
             setVoiceError("实时语音提交失败，请先改用文字训练或浏览器语音。")
             console.warn("Realtime voice turn failed", error)
@@ -793,22 +802,31 @@ export function TrainingApp({ scenarios, variants: initialVariants }: { scenario
       },
       onTtsStart: () => {
         if (!realtimeVoiceRef.current) return
+        realtimeTurnGateRef.current = "scammer-speaking"
         setVoiceProvider("dashscope")
         setVoiceStatus("speaking-scammer")
         setVoiceError("")
+        setVoiceTranscript(null)
       },
       onTtsEnd: () => {
         if (!realtimeVoiceRef.current || finishedRef.current) return
-        setVoiceStatus("listening-user")
         setVoiceTranscript(null)
-        void client.startListening().catch((error) => {
-          if (!realtimeVoiceRef.current) return
-          voiceLoopRef.current = false
-          realtimeVoiceRef.current = false
-          setVoiceStatus("error")
-          setVoiceError("实时语音识别启动失败。请点击“重新开启麦克风”再试，也可以改用文字输入。")
-          console.warn("Realtime ASR failed", error)
-        })
+        void (async () => {
+          try {
+            await client.startListening()
+            if (!realtimeVoiceRef.current || finishedRef.current) return
+            realtimeTurnGateRef.current = "listening-user"
+            setVoiceStatus("listening-user")
+          } catch (error) {
+            if (!realtimeVoiceRef.current) return
+            voiceLoopRef.current = false
+            realtimeVoiceRef.current = false
+            realtimeTurnGateRef.current = "finished"
+            setVoiceStatus("error")
+            setVoiceError("实时语音识别启动失败。请点击“重新开启麦克风”再试，也可以改用文字输入。")
+            console.warn("Realtime ASR failed", error)
+          }
+        })()
       },
       onError: (message, scope) => {
         console.warn("Realtime voice gateway error", scope, message)
@@ -816,6 +834,7 @@ export function TrainingApp({ scenarios, variants: initialVariants }: { scenario
         if (!realtimeVoiceRef.current) return
         voiceLoopRef.current = false
         realtimeVoiceRef.current = false
+        realtimeTurnGateRef.current = "finished"
         setVoiceStatus("error")
         setVoiceError("阿里云实时语音暂时不可用。请点击“重新开启麦克风”再试，也可以改用文字输入。")
       },
@@ -825,6 +844,7 @@ export function TrainingApp({ scenarios, variants: initialVariants }: { scenario
       realtimeClientRef.current = client
       realtimeVoiceRef.current = true
       voiceLoopRef.current = true
+      realtimeTurnGateRef.current = "scammer-speaking"
       await client.connect()
       client.setMuted(voiceMuted)
       await client.prepareVoice(scenarioVoice.voice)
@@ -834,6 +854,7 @@ export function TrainingApp({ scenarios, variants: initialVariants }: { scenario
         if (!firstTurn) {
           voiceLoopRef.current = false
           realtimeVoiceRef.current = false
+          realtimeTurnGateRef.current = "finished"
           setVoiceStatus("error")
           setVoiceError("当前场景没有可播放的话术，请切换场景。")
           return true
@@ -865,6 +886,7 @@ export function TrainingApp({ scenarios, variants: initialVariants }: { scenario
     } catch (error) {
       console.warn("Realtime voice gateway unavailable, falling back to browser voice", error)
       realtimeVoiceRef.current = false
+      realtimeTurnGateRef.current = "finished"
       realtimeClientRef.current?.close()
       realtimeClientRef.current = null
       return false

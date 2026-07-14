@@ -137,13 +137,14 @@ export class RealtimeVoiceClient {
   async startListening() {
     await this.connect()
     await this.ensureInput()
-    this.send({ type: "asr.start" })
     this.listening = true
+    this.send({ type: "asr.start" })
   }
 
   stopListening(commit = true) {
+    const wasListening = this.listening
     this.listening = false
-    if (commit) this.send({ type: "asr.stop" })
+    if (commit && wasListening) this.send({ type: "asr.stop" })
 
     if (this.processorNode) {
       this.processorNode.disconnect()
@@ -173,7 +174,7 @@ export class RealtimeVoiceClient {
     if (validSegments.length === 0) return
 
     await this.connect()
-    this.stopListening(false)
+    this.stopListening(true)
     this.cancelPlayback()
     this.playbackQueue = [...validSegments]
     const firstTts = validSegments.find((segment) => segment.kind === "tts")
@@ -409,10 +410,10 @@ export class RealtimeVoiceClient {
         this.options.onReady?.()
         break
       case "asr.partial":
-        if (event.text) this.options.onPartial?.(event.text)
+        if (this.listening && event.text) this.options.onPartial?.(event.text)
         break
       case "asr.final":
-        if (event.text) this.options.onFinal?.(event.text)
+        if (this.listening && event.text) this.options.onFinal?.(event.text)
         break
       case "tts.ready":
         this.preparedVoice = String(event.voice || this.pendingPrepareVoice).trim()
