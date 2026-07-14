@@ -827,6 +827,7 @@ export function TrainingApp({ scenarios, variants: initialVariants }: { scenario
       voiceLoopRef.current = true
       await client.connect()
       client.setMuted(voiceMuted)
+      await client.prepareVoice(scenarioVoice.voice)
 
       if (!started) {
         const firstTurn = activeScenario.script[0]

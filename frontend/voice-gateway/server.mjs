@@ -6,6 +6,7 @@ import { WebSocket, WebSocketServer } from "ws"
 
 const here = dirname(fileURLToPath(import.meta.url))
 const frontendRoot = resolve(here, "..")
+const GATEWAY_VERSION = "2.0.0-realtime-stability"
 
 loadLocalEnv(resolve(frontendRoot, ".env.local"))
 
@@ -24,6 +25,8 @@ const TTS_INSTRUCT_URL = process.env.DASHSCOPE_TTS_INSTRUCT_WS_URL || ""
 const TTS_VOICE = process.env.DASHSCOPE_TTS_VOICE || "Cherry"
 const ASR_SAMPLE_RATE = Number(process.env.VOICE_ASR_SAMPLE_RATE || 16000)
 const TTS_SAMPLE_RATE = Number(process.env.VOICE_TTS_SAMPLE_RATE || 24000)
+const ASR_VAD_THRESHOLD = Number(process.env.VOICE_ASR_VAD_THRESHOLD || 0.2)
+const ASR_SILENCE_DURATION_MS = Number(process.env.VOICE_ASR_SILENCE_DURATION_MS || 400)
 
 if (!API_KEY) {
   console.error("[voice-gateway] Missing DASHSCOPE_API_KEY in environment or frontend/.env.local")
@@ -38,7 +41,16 @@ if (process.env.NODE_ENV === "production" && ALLOWED_ORIGINS.length === 0) {
 const server = createServer((req, res) => {
   if (req.url === "/health") {
     res.writeHead(200, { "content-type": "application/json" })
-    res.end(JSON.stringify({ ok: true, service: "oldcheat-voice-gateway" }))
+    res.end(
+      JSON.stringify({
+        ok: true,
+        service: "oldcheat-voice-gateway",
+        version: GATEWAY_VERSION,
+        protocolVersion: 2,
+        asr: { vadThreshold: ASR_VAD_THRESHOLD, silenceDurationMs: ASR_SILENCE_DURATION_MS },
+        tts: { persistentConnection: true },
+      }),
+    )
     return
   }
 
@@ -66,11 +78,21 @@ wss.on("connection", (client) => {
     asrReady: false,
     asrStarting: false,
     lastPartial: "",
-    ttsPendingText: "",
+    asrSpeechStoppedAt: 0,
+    ttsReady: false,
+    ttsStarting: null,
+    ttsVoice: "",
+    ttsUrl: "",
+    ttsInstructions: "",
+    ttsActive: null,
     closed: false,
   }
 
-  sendClient(client, { type: "gateway.ready", sampleRates: { asr: ASR_SAMPLE_RATE, tts: TTS_SAMPLE_RATE } })
+  sendClient(client, {
+    type: "gateway.ready",
+    sampleRates: { asr: ASR_SAMPLE_RATE, tts: TTS_SAMPLE_RATE },
+    capabilities: { protocolVersion: 2, ttsPrewarm: true, persistentTts: true },
+  })
 
   client.on("message", (raw) => {
     let event
@@ -103,26 +125,37 @@ async function handleClientEvent(client, session, event) {
       break
     case "asr.audio":
       if (session.asr?.readyState === WebSocket.OPEN && typeof event.audio === "string") {
-        session.asr.send(JSON.stringify({ type: "input_audio_buffer.append", audio: event.audio }))
+        session.asr.send(
+          JSON.stringify({ event_id: eventId("asr_audio"), type: "input_audio_buffer.append", audio: event.audio }),
+        )
       }
       break
     case "asr.stop":
       if (session.asr?.readyState === WebSocket.OPEN) {
-        session.asr.send(JSON.stringify({ type: "input_audio_buffer.commit" }))
+        session.asr.send(JSON.stringify({ event_id: eventId("asr_finish"), type: "session.finish" }))
       }
+      break
+    case "tts.prepare":
+      await ensureTtsSession(client, session, event.voice)
       break
     case "tts.speak":
       if (typeof event.text === "string" && event.text.trim()) {
         const speech = splitSpeechCue(event.text.trim())
         const requestedInstructions = typeof event.instructions === "string" ? event.instructions.trim() : ""
         const instructions = requestedInstructions || speech.instructions
-        await speakText(client, session, speech.speechText, instructions, event.voice, Boolean(requestedInstructions))
+        await speakText(
+          client,
+          session,
+          speech.speechText,
+          instructions,
+          event.voice,
+          Boolean(requestedInstructions),
+          event.utteranceId,
+        )
       }
       break
     case "tts.stop":
-      closeSocket(session.tts)
-      session.tts = null
-      sendClient(client, { type: "tts.done" })
+      stopTtsSession(client, session, event.utteranceId)
       break
     case "close":
       closeSession(session)
@@ -162,10 +195,13 @@ function startAsr(client, session) {
             modalities: ["text"],
             input_audio_format: "pcm",
             sample_rate: ASR_SAMPLE_RATE,
+            input_audio_transcription: {
+              language: "zh",
+            },
             turn_detection: {
               type: "server_vad",
-              threshold: 0.0,
-              silence_duration_ms: 600,
+              threshold: ASR_VAD_THRESHOLD,
+              silence_duration_ms: ASR_SILENCE_DURATION_MS,
             },
           },
         }),
@@ -183,10 +219,25 @@ function startAsr(client, session) {
         return
       }
 
+      if (event.type === "input_audio_buffer.speech_started") {
+        sendClient(client, { type: "asr.speech_started" })
+        return
+      }
+
+      if (event.type === "input_audio_buffer.speech_stopped") {
+        session.asrSpeechStoppedAt = Date.now()
+        sendClient(client, { type: "asr.speech_stopped" })
+        return
+      }
+
       const mapped = mapAsrEvent(event, session.lastPartial)
       if (!mapped) return
 
       if (mapped.final) {
+        if (session.asrSpeechStoppedAt) {
+          console.log(`[voice-gateway] ASR final after ${Date.now() - session.asrSpeechStoppedAt}ms`)
+          session.asrSpeechStoppedAt = 0
+        }
         session.lastPartial = ""
         sendClient(client, { type: "asr.final", text: mapped.text, emotion: mapped.emotion })
       } else if (mapped.text !== session.lastPartial) {
@@ -208,112 +259,205 @@ function startAsr(client, session) {
   })
 }
 
-function speakText(client, session, text, instructions = "", requestedVoice = "", preferInstruct = false) {
-  closeSocket(session.tts)
-  session.ttsPendingText = text
+async function speakText(
+  client,
+  session,
+  text,
+  instructions = "",
+  requestedVoice = "",
+  preferInstruct = false,
+  requestedUtteranceId = "",
+) {
+  const utteranceId = normalizeUtteranceId(requestedUtteranceId)
   const ttsUrl = preferInstruct && TTS_INSTRUCT_URL ? TTS_INSTRUCT_URL : TTS_URL
   const supportsInstructions = /instruct/i.test(ttsUrl)
   const voice = resolveTtsVoice(requestedVoice)
+  const effectiveInstructions = supportsInstructions ? instructions : ""
 
-  return new Promise((resolvePromise) => {
+  if (session.ttsActive) stopTtsSession(client, session, session.ttsActive.utteranceId)
+  await ensureTtsSession(client, session, voice, ttsUrl, effectiveInstructions)
+
+  if (!session.tts || session.tts.readyState !== WebSocket.OPEN || !session.ttsReady) {
+    sendClient(client, {
+      type: "error",
+      scope: "tts",
+      utteranceId,
+      message: "DashScope TTS session is not ready",
+    })
+    return
+  }
+
+  session.ttsActive = { utteranceId, text, done: false, requestedAt: Date.now(), firstAudioReceived: false }
+  sendClient(client, { type: "tts.started", utteranceId, text, voice })
+  session.tts.send(JSON.stringify({ event_id: eventId("tts_append"), type: "input_text_buffer.append", text }))
+  session.tts.send(JSON.stringify({ event_id: eventId("tts_commit"), type: "input_text_buffer.commit" }))
+}
+
+function ensureTtsSession(client, session, requestedVoice = "", requestedUrl = TTS_URL, instructions = "") {
+  const voice = resolveTtsVoice(requestedVoice)
+  const ttsUrl = requestedUrl || TTS_URL
+  const supportsInstructions = /instruct/i.test(ttsUrl)
+  const effectiveInstructions = supportsInstructions ? instructions : ""
+  const signatureMatches =
+    session.ttsVoice === voice &&
+    session.ttsUrl === ttsUrl &&
+    session.ttsInstructions === effectiveInstructions
+
+  if (session.tts?.readyState === WebSocket.OPEN && session.ttsReady && signatureMatches) {
+    sendClient(client, { type: "tts.ready", voice })
+    return Promise.resolve()
+  }
+
+  if (session.ttsStarting && signatureMatches) return session.ttsStarting
+
+  resetTtsSession(session)
+  session.ttsVoice = voice
+  session.ttsUrl = ttsUrl
+  session.ttsInstructions = effectiveInstructions
+
+  const starting = new Promise((resolvePromise) => {
     const tts = new WebSocket(ttsUrl, { headers: upstreamHeaders() })
     session.tts = tts
-    let sentText = false
-    let sentDone = false
-    let reportedError = false
+    let settled = false
     const timeout = setTimeout(() => {
-      if (sentDone || reportedError) return
-      reportedError = true
-      sendClient(client, { type: "error", scope: "tts", message: "DashScope TTS session timed out" })
-      closeSocket(tts)
+      if (settled || session.tts !== tts) return
+      settled = true
+      sendClient(client, { type: "error", scope: "tts.prepare", message: "DashScope TTS connection timed out" })
+      resetTtsSession(session)
       resolvePromise()
-    }, 30_000)
+    }, 10_000)
 
-    const sendText = () => {
-      if (sentText || tts.readyState !== WebSocket.OPEN) return
-      sentText = true
-      sendClient(client, { type: "tts.started", text, voice })
-      tts.send(JSON.stringify({ event_id: eventId("tts_append"), type: "input_text_buffer.append", text }))
-      tts.send(JSON.stringify({ event_id: eventId("tts_commit"), type: "input_text_buffer.commit" }))
-    }
-
-    const finishTts = () => {
-      if (sentDone) return
-      sentDone = true
+    const settle = () => {
+      if (settled) return
+      settled = true
       clearTimeout(timeout)
-      sendClient(client, { type: "tts.done" })
-      if (tts.readyState === WebSocket.OPEN) {
-        tts.send(JSON.stringify({ event_id: eventId("tts_finish"), type: "session.finish" }))
-      }
+      if (session.ttsStarting === starting) session.ttsStarting = null
+      resolvePromise()
     }
 
     tts.on("open", () => {
+      if (session.tts !== tts) return
       const ttsSession = {
         voice,
         mode: "commit",
         language_type: "Chinese",
         response_format: "pcm",
         sample_rate: TTS_SAMPLE_RATE,
-        instructions: supportsInstructions ? instructions : "",
-        optimize_instructions: supportsInstructions && Boolean(instructions),
+        instructions: effectiveInstructions,
+        optimize_instructions: Boolean(effectiveInstructions),
       }
       tts.send(JSON.stringify({ event_id: eventId("tts_update"), type: "session.update", session: ttsSession }))
-      resolvePromise()
     })
 
     tts.on("message", (raw) => {
+      if (session.tts !== tts) return
       const event = parseJson(raw)
       if (!event) return
 
       if (event.type === "session.updated") {
-        sendText()
+        session.ttsReady = true
+        sendClient(client, { type: "tts.ready", voice })
+        settle()
         return
       }
 
       if (event.type === "error") {
-        reportedError = true
-        clearTimeout(timeout)
+        const active = session.ttsActive
         sendClient(client, {
           type: "error",
-          scope: "tts",
+          scope: active ? "tts" : "tts.prepare",
+          utteranceId: active?.utteranceId,
           message: event.error?.message || event.message || "DashScope TTS returned an error",
         })
-        closeSocket(tts)
+        session.ttsActive = null
+        resetTtsSession(session)
+        settle()
         return
       }
 
+      const active = session.ttsActive
       const audio = event.delta || event.audio || event.data?.audio || event.output?.audio
-      if (event.type === "response.audio.delta" && typeof audio === "string") {
-        sendClient(client, { type: "tts.audio", audio, sampleRate: TTS_SAMPLE_RATE })
+      if (event.type === "response.audio.delta" && active && typeof audio === "string") {
+        if (!active.firstAudioReceived) {
+          active.firstAudioReceived = true
+          console.log(`[voice-gateway] TTS first audio after ${Date.now() - active.requestedAt}ms`)
+        }
+        sendClient(client, {
+          type: "tts.audio",
+          utteranceId: active.utteranceId,
+          audio,
+          sampleRate: TTS_SAMPLE_RATE,
+        })
         return
       }
 
-      if (event.type === "response.audio.done" || event.type === "response.done") {
-        finishTts()
+      if ((event.type === "response.audio.done" || event.type === "response.done") && active) {
+        finishActiveTts(client, session, active.utteranceId)
         return
       }
 
-      if (event.type === "session.finished") {
-        closeSocket(tts)
-      }
+      if (event.type === "session.finished") resetTtsSession(session)
     })
 
     tts.on("error", (error) => {
-      reportedError = true
-      clearTimeout(timeout)
-      sendClient(client, { type: "error", scope: "tts", message: readableError(error) })
-      resolvePromise()
+      if (session.tts !== tts) return
+      const active = session.ttsActive
+      sendClient(client, {
+        type: "error",
+        scope: active ? "tts" : "tts.prepare",
+        utteranceId: active?.utteranceId,
+        message: readableError(error),
+      })
+      session.ttsActive = null
+      resetTtsSession(session)
+      settle()
     })
 
     tts.on("close", () => {
-      clearTimeout(timeout)
-      if (!sentDone && !reportedError) {
-        reportedError = true
-        sendClient(client, { type: "error", scope: "tts", message: "DashScope TTS connection closed early" })
+      if (session.tts !== tts) return
+      const active = session.ttsActive
+      session.tts = null
+      session.ttsReady = false
+      session.ttsActive = null
+      if (active) {
+        sendClient(client, {
+          type: "error",
+          scope: "tts",
+          utteranceId: active.utteranceId,
+          message: "DashScope TTS connection closed early",
+        })
       }
-      if (session.tts === tts) session.tts = null
+      settle()
     })
   })
+
+  session.ttsStarting = starting
+  return starting
+}
+
+function finishActiveTts(client, session, utteranceId) {
+  const active = session.ttsActive
+  if (!active || active.done || active.utteranceId !== utteranceId) return
+  active.done = true
+  session.ttsActive = null
+  sendClient(client, { type: "tts.done", utteranceId })
+}
+
+function stopTtsSession(client, session, requestedUtteranceId = "") {
+  const active = session.ttsActive
+  const utteranceId = String(requestedUtteranceId || active?.utteranceId || "").trim()
+  session.ttsActive = null
+  if (utteranceId) sendClient(client, { type: "tts.done", utteranceId })
+  resetTtsSession(session)
+}
+
+function resetTtsSession(session) {
+  const socket = session.tts
+  session.tts = null
+  session.ttsReady = false
+  session.ttsStarting = null
+  session.ttsActive = null
+  closeSocket(socket)
 }
 
 function resolveTtsVoice(value) {
@@ -374,9 +518,8 @@ function closeSession(session) {
   if (session.closed) return
   session.closed = true
   closeSocket(session.asr)
-  closeSocket(session.tts)
   session.asr = null
-  session.tts = null
+  resetTtsSession(session)
 }
 
 function closeSocket(socket) {
@@ -406,6 +549,12 @@ function firstString(...values) {
 
 function eventId(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2)}`
+}
+
+function normalizeUtteranceId(value) {
+  const normalized = String(value || "").trim()
+  if (/^[A-Za-z0-9_-]{8,96}$/.test(normalized)) return normalized
+  return eventId("tts")
 }
 
 function readableError(error) {

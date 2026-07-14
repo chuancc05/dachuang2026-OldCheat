@@ -12,6 +12,7 @@
         "test:smoke": "node scripts/run-training-smoke-tests.mjs",
         "test:variants": "node scripts/test-story-variants.mjs",
         "voice:gateway": "node voice-gateway/server.mjs",
+        "voice:test": "node voice-gateway/smoke-test.mjs",
         "audio:cues": "node scripts/generate-audio-cues.mjs"
     },
     "dependencies": {

@@ -14,14 +14,15 @@ type RealtimeVoiceClientOptions = {
 }
 
 type GatewayEvent =
-  | { type: "gateway.ready" }
+  | { type: "gateway.ready"; capabilities?: { protocolVersion?: number; ttsPrewarm?: boolean } }
   | { type: "asr.ready" }
   | { type: "asr.partial"; text?: string }
   | { type: "asr.final"; text?: string }
-  | { type: "tts.started"; text?: string }
-  | { type: "tts.audio"; audio?: string; sampleRate?: number }
-  | { type: "tts.done" }
-  | { type: "error"; message?: string; scope?: string }
+  | { type: "tts.ready"; voice?: string }
+  | { type: "tts.started"; text?: string; utteranceId?: string }
+  | { type: "tts.audio"; audio?: string; sampleRate?: number; utteranceId?: string }
+  | { type: "tts.done"; utteranceId?: string }
+  | { type: "error"; message?: string; scope?: string; utteranceId?: string }
 
 type BrowserAudioContext = typeof AudioContext
 
@@ -45,9 +46,20 @@ export class RealtimeVoiceClient {
   private nextPlayTime = 0
   private sequenceTimer: number | null = null
   private playbackQueue: VoicePlaybackSegment[] = []
+  private playbackGeneration = 0
+  private audioChunkQueue: Promise<void> = Promise.resolve()
+  private activeSources = new Set<AudioBufferSourceNode>()
   private activeTtsFallbackSrc: string | null = null
   private activeTtsFallbackText: string | null = null
+  private activeTtsId: string | null = null
   private ttsInFlight = false
+  private gatewayCapabilitiesKnown = false
+  private supportsTtsPrewarm = false
+  private preparedVoice = ""
+  private pendingPrepareVoice = ""
+  private preparePromise: Promise<void> | null = null
+  private prepareResolve: (() => void) | null = null
+  private prepareTimer: number | null = null
   private muted = false
   private listening = false
 
@@ -88,11 +100,38 @@ export class RealtimeVoiceClient {
       socket.onmessage = (event) => this.handleGatewayMessage(event.data)
       socket.onclose = () => {
         this.socket = null
+        this.gatewayCapabilitiesKnown = false
+        this.supportsTtsPrewarm = false
+        this.preparedVoice = ""
+        this.finishVoicePreparation()
         this.stopListening(false)
         this.cancelPlayback(false)
         this.options.onClose?.()
       }
     })
+  }
+
+  async prepareVoice(voice?: string) {
+    const requestedVoice = String(voice || "").trim()
+    if (!requestedVoice) return
+
+    await this.connect()
+    if (this.preparedVoice === requestedVoice) return
+    if (this.gatewayCapabilitiesKnown && !this.supportsTtsPrewarm) return
+    if (this.preparePromise && this.pendingPrepareVoice === requestedVoice) return this.preparePromise
+
+    this.finishVoicePreparation()
+    this.pendingPrepareVoice = requestedVoice
+    this.preparePromise = new Promise<void>((resolve) => {
+      this.prepareResolve = resolve
+      this.prepareTimer = window.setTimeout(() => this.finishVoicePreparation(), 2500)
+    })
+
+    if (this.gatewayCapabilitiesKnown && this.supportsTtsPrewarm) {
+      this.send({ type: "tts.prepare", voice: requestedVoice })
+    }
+
+    return this.preparePromise
   }
 
   async startListening() {
@@ -179,9 +218,11 @@ export class RealtimeVoiceClient {
 
     this.activeTtsFallbackSrc = segment.fallbackSrc ?? null
     this.activeTtsFallbackText = segment.text.trim()
+    this.activeTtsId = createUtteranceId()
     this.ttsInFlight = true
     this.send({
       type: "tts.speak",
+      utteranceId: this.activeTtsId,
       text: segment.text.trim(),
       voice: segment.voice,
       instructions: segment.instructions,
@@ -200,25 +241,37 @@ export class RealtimeVoiceClient {
   }
 
   private cancelPlayback(notifyGateway = true) {
+    const cancelledTtsId = this.activeTtsId
     if (this.sequenceTimer) {
       window.clearTimeout(this.sequenceTimer)
       this.sequenceTimer = null
     }
+    this.playbackGeneration += 1
+    this.audioChunkQueue = Promise.resolve()
     this.playbackQueue = []
     this.activeTtsFallbackSrc = null
     this.activeTtsFallbackText = null
+    this.activeTtsId = null
     const shouldStopTts = notifyGateway && this.ttsInFlight
     this.ttsInFlight = false
     this.nextPlayTime = 0
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.cancel()
     }
+    for (const source of this.activeSources) {
+      try {
+        source.stop()
+      } catch {
+        // The source may already have reached its natural end.
+      }
+    }
+    this.activeSources.clear()
     if (this.outputContext) {
       void this.outputContext.close()
       this.outputContext = null
       this.outputGain = null
     }
-    if (shouldStopTts) this.send({ type: "tts.stop" })
+    if (shouldStopTts) this.send({ type: "tts.stop", utteranceId: cancelledTtsId })
   }
 
   private async ensureInput() {
@@ -264,8 +317,20 @@ export class RealtimeVoiceClient {
     return this.outputContext
   }
 
-  private async playPcm(base64Audio: string, sampleRate: number) {
+  private enqueuePcm(base64Audio: string, sampleRate: number) {
+    const generation = this.playbackGeneration
+    this.audioChunkQueue = this.audioChunkQueue
+      .then(() => this.playPcm(base64Audio, sampleRate, generation))
+      .catch((error) => {
+        if (generation !== this.playbackGeneration) return
+        this.options.onError?.(readableError(error), "tts")
+      })
+  }
+
+  private async playPcm(base64Audio: string, sampleRate: number, generation: number) {
+    if (generation !== this.playbackGeneration) return
     const context = await this.ensureOutput()
+    if (generation !== this.playbackGeneration || context.state === "closed") return
     const pcm = base64ToInt16(base64Audio)
     const buffer = context.createBuffer(1, pcm.length, sampleRate || TTS_SAMPLE_RATE)
     const channel = buffer.getChannelData(0)
@@ -276,8 +341,10 @@ export class RealtimeVoiceClient {
     const source = context.createBufferSource()
     source.buffer = buffer
     source.connect(this.outputGain ?? context.destination)
+    source.onended = () => this.activeSources.delete(source)
+    this.activeSources.add(source)
     const minimumStart = context.currentTime + TTS_MIN_CHUNK_LEAD_SECONDS
-    if (this.nextPlayTime <= context.currentTime || this.nextPlayTime - context.currentTime > 1.5) {
+    if (this.nextPlayTime <= context.currentTime) {
       this.nextPlayTime = context.currentTime + TTS_START_BUFFER_SECONDS
     }
     const startAt = Math.max(this.nextPlayTime, minimumStart)
@@ -327,6 +394,17 @@ export class RealtimeVoiceClient {
 
     switch (event.type) {
       case "gateway.ready":
+        this.gatewayCapabilitiesKnown = true
+        this.supportsTtsPrewarm = event.capabilities?.ttsPrewarm === true
+        if (this.pendingPrepareVoice) {
+          if (this.supportsTtsPrewarm) {
+            this.send({ type: "tts.prepare", voice: this.pendingPrepareVoice })
+          } else {
+            this.finishVoicePreparation()
+          }
+        }
+        this.options.onReady?.()
+        break
       case "asr.ready":
         this.options.onReady?.()
         break
@@ -336,27 +414,32 @@ export class RealtimeVoiceClient {
       case "asr.final":
         if (event.text) this.options.onFinal?.(event.text)
         break
+      case "tts.ready":
+        this.preparedVoice = String(event.voice || this.pendingPrepareVoice).trim()
+        this.finishVoicePreparation()
+        break
       case "tts.started":
         break
       case "tts.audio":
-        if (event.audio) {
-          void this.playPcm(event.audio, event.sampleRate || TTS_SAMPLE_RATE).catch((error) => {
-            this.options.onError?.(readableError(error), "tts")
-          })
-        }
+        if (event.utteranceId && event.utteranceId !== this.activeTtsId) break
+        if (event.audio) this.enqueuePcm(event.audio, event.sampleRate || TTS_SAMPLE_RATE)
         break
       case "tts.done":
+        if (event.utteranceId && event.utteranceId !== this.activeTtsId) break
         if (!this.ttsInFlight) break
-        this.activeTtsFallbackSrc = null
-        this.activeTtsFallbackText = null
-        this.ttsInFlight = false
-        this.scheduleQueueAdvance()
+        void this.finishCurrentTts(this.playbackGeneration, this.activeTtsId)
         break
       case "error":
+        if (event.scope === "tts.prepare") {
+          this.finishVoicePreparation()
+          break
+        }
+        if (event.utteranceId && event.utteranceId !== this.activeTtsId) break
         if (event.scope === "tts" && this.activeTtsFallbackSrc) {
           this.playbackQueue.unshift({ kind: "asset", src: this.activeTtsFallbackSrc })
           this.activeTtsFallbackSrc = null
           this.activeTtsFallbackText = null
+          this.activeTtsId = null
           this.ttsInFlight = false
           this.scheduleQueueAdvance()
           break
@@ -364,18 +447,42 @@ export class RealtimeVoiceClient {
         if (event.scope === "tts" && this.activeTtsFallbackText) {
           const fallbackText = this.activeTtsFallbackText
           this.activeTtsFallbackText = null
+          this.activeTtsId = null
           this.ttsInFlight = false
           void this.playBrowserSpeech(fallbackText).finally(() => this.scheduleQueueAdvance())
           this.options.onError?.("阿里云语音暂不可用，已使用浏览器语音继续训练。", event.scope)
           break
         }
         if (event.scope === "tts") {
+          this.activeTtsId = null
           this.ttsInFlight = false
           this.scheduleQueueAdvance()
         }
         this.options.onError?.(event.message || "Voice gateway error", event.scope)
         break
     }
+  }
+
+  private async finishCurrentTts(generation: number, utteranceId: string | null) {
+    await this.audioChunkQueue
+    if (generation !== this.playbackGeneration || utteranceId !== this.activeTtsId || !this.ttsInFlight) return
+    this.activeTtsFallbackSrc = null
+    this.activeTtsFallbackText = null
+    this.activeTtsId = null
+    this.ttsInFlight = false
+    this.scheduleQueueAdvance()
+  }
+
+  private finishVoicePreparation() {
+    if (this.prepareTimer) {
+      window.clearTimeout(this.prepareTimer)
+      this.prepareTimer = null
+    }
+    const resolve = this.prepareResolve
+    this.prepareResolve = null
+    this.preparePromise = null
+    this.pendingPrepareVoice = ""
+    resolve?.()
   }
 
   private send(payload: unknown) {
@@ -436,4 +543,9 @@ function base64ToInt16(base64: string) {
 function readableError(error: unknown) {
   if (error instanceof Error) return error.message
   return String(error || "Unknown error")
+}
+
+function createUtteranceId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID()
+  return `tts_${Date.now()}_${Math.random().toString(36).slice(2)}`
 }
