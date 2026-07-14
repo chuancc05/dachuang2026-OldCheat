@@ -1,7 +1,6 @@
 [build]
-base = "frontend"
-command = "pnpm run build"
-publish = ".next"
+command = "cd frontend && pnpm run build"
+publish = "frontend/.next"
 
 [build.environment]
 NODE_VERSION = "20"
