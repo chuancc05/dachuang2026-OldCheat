@@ -293,6 +293,10 @@ async function speakText(
     done: false,
     requestedAt: Date.now(),
     firstAudioReceived: false,
+    firstPacketSentAt: 0,
+    lastUpstreamAudioAt: 0,
+    maxUpstreamGapMs: 0,
+    packetCount: 0,
     audioChunks: [],
     audioBytes: 0,
     flushTimer: null,
@@ -448,6 +452,11 @@ function finishActiveTts(client, session, utteranceId) {
   flushTtsAudio(client, session, active)
   active.done = true
   session.ttsActive = null
+  console.log(
+    `[voice-gateway] TTS finished in ${Date.now() - active.requestedAt}ms; ` +
+      `packets=${active.packetCount}; firstPacket=${active.firstPacketSentAt ? active.firstPacketSentAt - active.requestedAt : "n/a"}ms; ` +
+      `maxUpstreamGap=${active.maxUpstreamGapMs}ms`,
+  )
   sendClient(client, { type: "tts.done", utteranceId })
 }
 
@@ -474,6 +483,12 @@ function queueTtsAudio(client, session, active, audio) {
   const chunk = Buffer.from(audio, "base64")
   if (chunk.length === 0 || session.ttsActive !== active || active.done) return
 
+  const receivedAt = Date.now()
+  if (active.lastUpstreamAudioAt) {
+    active.maxUpstreamGapMs = Math.max(active.maxUpstreamGapMs, receivedAt - active.lastUpstreamAudioAt)
+  }
+  active.lastUpstreamAudioAt = receivedAt
+
   active.audioChunks.push(chunk)
   active.audioBytes += chunk.length
   if (active.audioBytes >= TTS_PACKET_BYTES) {
@@ -496,6 +511,8 @@ function flushTtsAudio(client, session, active) {
   const audio = Buffer.concat(active.audioChunks, active.audioBytes).toString("base64")
   active.audioChunks = []
   active.audioBytes = 0
+  active.packetCount += 1
+  if (!active.firstPacketSentAt) active.firstPacketSentAt = Date.now()
   sendClient(client, {
     type: "tts.audio",
     utteranceId: active.utteranceId,

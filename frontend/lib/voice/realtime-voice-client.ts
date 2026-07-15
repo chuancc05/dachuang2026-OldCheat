@@ -30,9 +30,11 @@ const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:8787/voice"
 const ASR_SAMPLE_RATE = 16000
 const TTS_SAMPLE_RATE = 24000
 const INPUT_BUFFER_SIZE = 2048
-// Mobile browsers need a modest jitter buffer. The gateway already batches PCM,
-// so this remains short enough to feel like a phone conversation.
-const TTS_START_BUFFER_SECONDS = 0.55
+// Mobile browsers reach the public gateway over a less predictable path than
+// desktop Wi-Fi. Keep desktop responsive while giving phone playback enough
+// queued PCM to avoid syllable-by-syllable gaps.
+const DESKTOP_TTS_START_BUFFER_SECONDS = 0.38
+const MOBILE_TTS_START_BUFFER_SECONDS = 1.15
 const TTS_MIN_CHUNK_LEAD_SECONDS = 0.03
 
 export class RealtimeVoiceClient {
@@ -367,7 +369,7 @@ export class RealtimeVoiceClient {
     this.activeSources.add(source)
     const minimumStart = context.currentTime + TTS_MIN_CHUNK_LEAD_SECONDS
     if (this.nextPlayTime <= context.currentTime) {
-      this.nextPlayTime = context.currentTime + TTS_START_BUFFER_SECONDS
+      this.nextPlayTime = context.currentTime + initialTtsBufferSeconds()
     }
     const startAt = Math.max(this.nextPlayTime, minimumStart)
     source.start(startAt)
@@ -590,6 +592,13 @@ function base64ToInt16(base64: string) {
 function readableError(error: unknown) {
   if (error instanceof Error) return error.message
   return String(error || "Unknown error")
+}
+
+function initialTtsBufferSeconds() {
+  if (typeof window === "undefined") return DESKTOP_TTS_START_BUFFER_SECONDS
+  const mobileAgent = /Android|iPhone|iPad|iPod|Mobile/iu.test(navigator.userAgent)
+  const coarsePointer = window.matchMedia?.("(pointer: coarse)").matches ?? false
+  return mobileAgent || coarsePointer ? MOBILE_TTS_START_BUFFER_SECONDS : DESKTOP_TTS_START_BUFFER_SECONDS
 }
 
 function createUtteranceId() {

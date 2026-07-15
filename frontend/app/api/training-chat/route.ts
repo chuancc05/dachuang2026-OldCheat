@@ -9,6 +9,7 @@ interface ChatRequest {
   messages: Message[]
   userText: string
   turnIndex: number
+  realtimeVoice?: boolean
 }
 
 type AiProvider = "auto" | "deepseek" | "ollama"
@@ -193,14 +194,14 @@ function sanitizeAiText(value: string): string {
     .slice(0, 180)
 }
 
-function buildSystemPrompt(scenario: Scenario, turnIndex: number, ragContext?: RagContext): string {
+function buildSystemPrompt(scenario: Scenario, turnIndex: number, ragContext?: RagContext, realtimeVoice = false): string {
   const examples = scenario.script
-    .slice(0, 8)
+    .slice(0, realtimeVoice ? 4 : 8)
     .map((turn, index) => `${index + 1}. ${turn.line}`)
     .join("\n")
 
   const ragReferences = ragContext?.references?.length
-    ? formatRagReferences(ragContext.references)
+    ? formatRagReferences(ragContext.references.slice(0, realtimeVoice ? 2 : 3))
     : "No retrieved examples."
   const variantRules = scenario.variant ? [
     "Locked story card for this session. These facts override any conflicting RAG example or reference line:",
@@ -228,7 +229,9 @@ function buildSystemPrompt(scenario: Scenario, turnIndex: number, ragContext?: R
     ragReferences,
     "Reply rules:",
     "1. Output only the next sentence or short paragraph from the simulated persona. No explanations, no role labels.",
-    "2. Keep it natural, oral, and scenario-specific. 36-72 Chinese characters is ideal.",
+    realtimeVoice
+      ? "2. Keep it natural, oral, and scenario-specific. Prefer 28-52 Chinese characters so this voice turn starts quickly."
+      : "2. Keep it natural, oral, and scenario-specific. 36-72 Chinese characters is ideal.",
     "3. Respond to the user's last message and continue the current scam scenario instead of becoming a generic assistant.",
     "4. You may simulate pressure, urgency, flattery, isolation, or fake authority for training purposes.",
     "5. Never request real bank cards, ID numbers, passwords, real verification codes, home addresses, or other sensitive data.",
@@ -247,17 +250,18 @@ function buildMessages(
   userText: string,
   turnIndex: number,
   ragContext?: RagContext,
+  realtimeVoice = false,
 ) {
   const recent = messages
     .filter((message) => message.sender !== "system")
-    .slice(-10)
+    .slice(realtimeVoice ? -6 : -10)
     .map((message) => ({
       role: message.sender === "user" ? "user" : "assistant",
       content: message.text,
     }))
 
   return [
-    { role: "system", content: buildSystemPrompt(scenario, turnIndex, ragContext) },
+    { role: "system", content: buildSystemPrompt(scenario, turnIndex, ragContext, realtimeVoice) },
     ...recent,
     { role: "user", content: userText },
   ]
@@ -279,6 +283,7 @@ async function askDeepSeek(
   userText: string,
   turnIndex: number,
   ragContext?: RagContext,
+  realtimeVoice = false,
 ): Promise<string> {
   const apiKey = deepSeekApiKey()
   if (!apiKey) throw new Error("DeepSeek API key is not configured")
@@ -292,10 +297,10 @@ async function askDeepSeek(
       },
       body: JSON.stringify({
         model: deepSeekDialogModel(),
-        messages: buildMessages(scenario, messages, userText, turnIndex, ragContext),
+        messages: buildMessages(scenario, messages, userText, turnIndex, ragContext, realtimeVoice),
         stream: false,
         temperature: 1.1,
-        max_tokens: 120,
+        max_tokens: realtimeVoice ? 88 : 120,
       }),
       signal,
     })
@@ -315,6 +320,7 @@ async function askOllama(
   userText: string,
   turnIndex: number,
   ragContext?: RagContext,
+  realtimeVoice = false,
 ): Promise<string> {
   return withTimeout(45_000, async (signal) => {
     const response = await fetch(`${ollamaUrl().replace(/\/$/, "")}/api/chat`, {
@@ -323,7 +329,7 @@ async function askOllama(
       body: JSON.stringify({
         model: ollamaModel(),
         stream: false,
-        messages: buildMessages(scenario, messages, userText, turnIndex, ragContext),
+        messages: buildMessages(scenario, messages, userText, turnIndex, ragContext, realtimeVoice),
         options: {
           temperature: 0.78,
           top_p: 0.9,
@@ -356,6 +362,7 @@ async function generateAiLine(
   userText: string,
   turnIndex: number,
   ragContext?: RagContext,
+  realtimeVoice = false,
 ): Promise<{ line: string; source: Exclude<AiSource, "fallback">; errors: string[] }> {
   const errors: string[] = []
 
@@ -363,8 +370,8 @@ async function generateAiLine(
     try {
       const line =
         provider === "deepseek"
-          ? await askDeepSeek(scenario, messages, userText, turnIndex, ragContext)
-          : await askOllama(scenario, messages, userText, turnIndex, ragContext)
+          ? await askDeepSeek(scenario, messages, userText, turnIndex, ragContext, realtimeVoice)
+          : await askOllama(scenario, messages, userText, turnIndex, ragContext, realtimeVoice)
       return { line, source: provider, errors }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -383,14 +390,14 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 })
   }
 
-  const { scenario, messages = [], userText = "", turnIndex = 0 } = body
+  const { scenario, messages = [], userText = "", turnIndex = 0, realtimeVoice = false } = body
   if (!scenario || !userText.trim()) {
     return NextResponse.json({ error: "Missing scenario or userText" }, { status: 400 })
   }
   const ragContext = await retrieveRagContext(scenario, messages, userText.trim())
 
   try {
-    const result = await generateAiLine(scenario, messages, userText.trim(), turnIndex, ragContext)
+    const result = await generateAiLine(scenario, messages, userText.trim(), turnIndex, ragContext, realtimeVoice)
     const audioTurn = createAudioTurn(scenario, normalizeAiIdentity(result.line, scenario), turnIndex)
     const trigger = pickTrigger(scenario, audioTurn.line, turnIndex)
     return NextResponse.json({

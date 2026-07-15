@@ -382,6 +382,7 @@ export function TrainingApp({ scenarios, variants: initialVariants }: { scenario
             messages: history,
             userText: text,
             turnIndex,
+            realtimeVoice: Boolean(realtimeVoiceRef.current),
           }),
         })
 
