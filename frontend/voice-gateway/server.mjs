@@ -6,7 +6,7 @@ import { WebSocket, WebSocketServer } from "ws"
 
 const here = dirname(fileURLToPath(import.meta.url))
 const frontendRoot = resolve(here, "..")
-const GATEWAY_VERSION = "2.0.0-realtime-stability"
+const GATEWAY_VERSION = "2.1.0-realtime-session-fix"
 
 loadLocalEnv(resolve(frontendRoot, ".env.local"))
 
@@ -123,6 +123,7 @@ server.listen(PORT, HOST, () => {
 async function handleClientEvent(client, session, event) {
   switch (event.type) {
     case "asr.start":
+      console.log("[voice-gateway] ASR start requested")
       await startAsr(client, session)
       break
     case "asr.audio":
@@ -133,6 +134,7 @@ async function handleClientEvent(client, session, event) {
       }
       break
     case "asr.stop":
+      console.log("[voice-gateway] ASR stopped by client")
       resetAsrSession(session)
       break
     case "tts.prepare":
@@ -187,6 +189,7 @@ function startAsr(client, session) {
     }
 
     asr.on("open", () => {
+      console.log("[voice-gateway] ASR upstream connected")
       asr.send(
         JSON.stringify({
           event_id: eventId("asr_update"),
@@ -215,17 +218,20 @@ function startAsr(client, session) {
 
       if (event.type === "session.created" || event.type === "session.updated") {
         session.asrReady = true
+        console.log(`[voice-gateway] ASR ready (${event.type})`)
         sendClient(client, { type: "asr.ready" })
         return
       }
 
       if (event.type === "input_audio_buffer.speech_started") {
+        console.log("[voice-gateway] ASR speech started")
         sendClient(client, { type: "asr.speech_started" })
         return
       }
 
       if (event.type === "input_audio_buffer.speech_stopped") {
         session.asrSpeechStoppedAt = Date.now()
+        console.log("[voice-gateway] ASR speech stopped")
         sendClient(client, { type: "asr.speech_stopped" })
         return
       }
@@ -239,6 +245,7 @@ function startAsr(client, session) {
           session.asrSpeechStoppedAt = 0
         }
         session.lastPartial = ""
+        console.log(`[voice-gateway] ASR final: ${mapped.text.slice(0, 80)}`)
         sendClient(client, { type: "asr.final", text: mapped.text, emotion: mapped.emotion })
       } else if (mapped.text !== session.lastPartial) {
         session.lastPartial = mapped.text
@@ -247,11 +254,13 @@ function startAsr(client, session) {
     })
 
     asr.on("error", (error) => {
+      console.error(`[voice-gateway] ASR upstream error: ${readableError(error)}`)
       sendClient(client, { type: "error", scope: "asr", message: readableError(error) })
       finishStart()
     })
 
-    asr.on("close", () => {
+    asr.on("close", (code, reason) => {
+      console.log(`[voice-gateway] ASR upstream closed (${code}${reason ? `: ${reason.toString()}` : ""})`)
       session.asrReady = false
       session.asrStarting = false
       if (session.asr === asr) session.asr = null
@@ -369,6 +378,7 @@ function ensureTtsSession(client, session, requestedVoice = "", requestedUrl = T
 
       if (event.type === "session.updated") {
         session.ttsReady = true
+        console.log("[voice-gateway] TTS ready")
         sendClient(client, { type: "tts.ready", voice })
         settle()
         return
@@ -400,7 +410,8 @@ function ensureTtsSession(client, session, requestedVoice = "", requestedUrl = T
         return
       }
 
-      if ((event.type === "response.audio.done" || event.type === "response.done") && active) {
+      if (isTtsCompletionEvent(event) && active) {
+        console.log(`[voice-gateway] TTS completion event: ${event.type}`)
         finishActiveTts(client, session, active.utteranceId)
         return
       }
@@ -534,6 +545,14 @@ function resolveTtsVoice(value) {
     return value.trim()
   }
   return TTS_VOICE
+}
+
+function isTtsCompletionEvent(event) {
+  const type = String(event?.type || "")
+  // DashScope normally emits response.audio.done. response.output_item.done is
+  // an equivalent terminal event in the documented realtime event stream and
+  // protects the training loop when the audio-specific event is not forwarded.
+  return ["response.audio.done", "response.output_item.done", "response.done"].includes(type)
 }
 
 function mapAsrEvent(event, lastPartial) {
