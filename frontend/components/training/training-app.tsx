@@ -770,7 +770,10 @@ export function TrainingApp({ scenarios, variants: initialVariants }: { scenario
 
         realtimeTurnGateRef.current = "submitted"
         realtimeSubmittingRef.current = true
-        client.stopListening(true)
+        // Keep this call's microphone device ready for the next turn. Audio is
+        // no longer forwarded after the final result, so scammer playback is
+        // still protected from interruption.
+        client.stopListening(true, false)
         setVoiceTranscript({ text: transcript, provider: "dashscope" })
         setVoiceStatus("thinking")
 

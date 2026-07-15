@@ -68,7 +68,7 @@ const VOICE_STATUS_COPY: Record<VoiceCallStatus, { title: string; detail: string
   idle: { title: "准备开始", detail: "点击开始后，系统会先播放对方的话。" },
   "requesting-permission": { title: "正在打开麦克风", detail: "请在浏览器提示里允许使用麦克风。" },
   "speaking-scammer": { title: "对方正在说话", detail: "先听完，不要着急转账或提供信息。" },
-  "listening-user": { title: "请你回答", detail: "可以直接对着手机说。" },
+  "listening-user": { title: "请你回复", detail: "请对着麦克风说出你的应对。" },
   recognizing: { title: "正在识别", detail: "请稍等，系统正在听清你的回答。" },
   thinking: { title: "正在思考", detail: "正在分析这句话里的风险。" },
   paused: { title: "语音已暂停", detail: "可以重新开启麦克风，或改用文字训练。" },
@@ -383,7 +383,7 @@ export function MobileTrainingFlow({
   return (
     <MobileFrame title={scenario.title} subtitle={scenario.persona} backAction={requestSceneSwitch}>
       <div className="flex min-h-0 flex-1 flex-col gap-4 pb-4">
-        <CallSummary scenario={scenario} durationLabel={durationLabel} provider={voiceProvider} status={status} />
+        <CallSummary scenario={scenario} durationLabel={durationLabel} provider={voiceProvider} status={status} listening={voiceStatus === "listening-user"} />
         <SubtitleCard text={voiceTranscript?.text || lastScammerLine} label={voiceTranscript?.text ? "你刚才说" : "对方字幕"} />
         <section className="rounded-2xl border bg-card p-4">
           <div className="flex items-center justify-between gap-3">
@@ -483,11 +483,13 @@ function CallSummary({
   durationLabel,
   provider,
   status,
+  listening,
 }: {
   scenario: Scenario
   durationLabel: string
   provider: VoiceProvider
   status: { title: string; detail: string }
+  listening?: boolean
 }) {
   const providerLabel = provider === "dashscope" ? "阿里云实时语音" : provider === "browser" ? "浏览器语音" : "等待语音服务"
   return (
@@ -503,6 +505,12 @@ function CallSummary({
       <p className="mt-2 text-xs text-muted-foreground">{providerLabel}</p>
       <h2 className="mt-4 text-3xl font-black leading-tight">{status.title}</h2>
       <p className="mt-2 text-base leading-relaxed text-muted-foreground">{status.detail}</p>
+      {listening && (
+        <p className="mt-4 inline-flex items-center gap-2 rounded-full bg-safe/10 px-4 py-2 text-lg font-bold text-safe" role="status">
+          <Mic className="size-5" />
+          请你回复
+        </p>
+      )}
     </section>
   )
 }

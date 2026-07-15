@@ -30,8 +30,14 @@ ttsServer.on("connection", (socket) => {
       return
     }
     if (event.type === "input_text_buffer.commit") {
-      const audio = Buffer.from(new Int16Array([0, 1200, -1200, 0]).buffer).toString("base64")
-      socket.send(JSON.stringify({ type: "response.audio.delta", delta: audio }))
+      const audioChunks = [
+        [0, 1200, -1200, 0],
+        [300, 900, -900, -300],
+        [600, 0, -600, 0],
+      ].map((samples) => Buffer.from(new Int16Array(samples).buffer).toString("base64"))
+      for (const audio of audioChunks) {
+        socket.send(JSON.stringify({ type: "response.audio.delta", delta: audio }))
+      }
       socket.send(JSON.stringify({ type: "response.audio.done" }))
     }
   })
@@ -48,12 +54,17 @@ const gateway = spawn(process.execPath, [gatewayPath], {
     DASHSCOPE_TTS_WS_URL: `ws://127.0.0.1:${ttsPort}`,
     VOICE_ASR_VAD_THRESHOLD: "0.2",
     VOICE_ASR_SILENCE_DURATION_MS: "400",
+    VOICE_TTS_PACKET_DURATION_MS: "80",
   },
   stdio: ["ignore", "pipe", "pipe"],
 })
 
 try {
   await waitForOutput(gateway.stdout, "listening on")
+  const health = await fetch(`http://127.0.0.1:${gatewayPort}/health`).then((response) => response.json())
+  assert.equal(health.ok, true)
+  assert.equal(health.tts?.packetDurationMs, 80)
+
   const client = new WebSocket(`ws://127.0.0.1:${gatewayPort}/voice`)
   const inbox = createInbox(client)
   await new Promise((resolve, reject) => {
@@ -78,6 +89,7 @@ try {
     const audio = await inbox.waitFor((event) => event.type === "tts.audio" && event.utteranceId === utteranceId)
     const done = await inbox.waitFor((event) => event.type === "tts.done" && event.utteranceId === utteranceId)
     assert.ok(audio.audio)
+    assert.equal(Buffer.from(audio.audio, "base64").byteLength, 24, "gateway should combine tiny PCM deltas into one packet")
     assert.equal(done.utteranceId, utteranceId)
   }
 

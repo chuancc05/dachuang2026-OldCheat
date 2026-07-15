@@ -228,7 +228,7 @@ function buildSystemPrompt(scenario: Scenario, turnIndex: number, ragContext?: R
     ragReferences,
     "Reply rules:",
     "1. Output only the next sentence or short paragraph from the simulated persona. No explanations, no role labels.",
-    "2. Keep it natural, oral, and scenario-specific. 40-90 Chinese characters is ideal.",
+    "2. Keep it natural, oral, and scenario-specific. 36-72 Chinese characters is ideal.",
     "3. Respond to the user's last message and continue the current scam scenario instead of becoming a generic assistant.",
     "4. You may simulate pressure, urgency, flattery, isolation, or fake authority for training purposes.",
     "5. Never request real bank cards, ID numbers, passwords, real verification codes, home addresses, or other sensitive data.",
@@ -295,7 +295,7 @@ async function askDeepSeek(
         messages: buildMessages(scenario, messages, userText, turnIndex, ragContext),
         stream: false,
         temperature: 1.1,
-        max_tokens: 220,
+        max_tokens: 120,
       }),
       signal,
     })

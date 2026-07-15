@@ -100,7 +100,13 @@ function ragEnabled(): boolean {
 }
 
 function ragTopK(): number {
-  return clampNumber(envValue("RAG_TOP_K"), 1, 8, 5)
+  return clampNumber(envValue("RAG_TOP_K"), 1, 8, 3)
+}
+
+function ragEmbedTimeoutMs(): number {
+  // A training conversation should continue with lexical retrieval when the
+  // remote embedding service is slow, rather than holding the voice turn open.
+  return clampNumber(envValue("RAG_EMBED_TIMEOUT_MS"), 800, 12_000, 3_000)
 }
 
 function ragUseVector(): boolean {
@@ -357,7 +363,7 @@ async function embedText(text: string): Promise<number[]> {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model: ragEmbedModel(provider), input: text.slice(0, 1200) }),
-    signal: AbortSignal.timeout(12_000),
+    signal: AbortSignal.timeout(ragEmbedTimeoutMs()),
   })
   if (!response.ok) throw new Error(`Ollama embed returned ${response.status}`)
   const data = await response.json()
@@ -382,7 +388,7 @@ async function embedTextWithDashScope(text: string): Promise<number[]> {
       dimensions: ragEmbedDimensions(),
       encoding_format: "float",
     }),
-    signal: AbortSignal.timeout(12_000),
+    signal: AbortSignal.timeout(ragEmbedTimeoutMs()),
   })
 
   if (!response.ok) throw new Error(`DashScope embed returned ${response.status}`)
@@ -404,9 +410,10 @@ function formatQuery(scenario: Scenario, messages: Message[], userText: string):
 export function formatRagReferences(references: RagReference[]): string {
   if (references.length === 0) return "No retrieved examples."
   return references
+    .slice(0, 3)
     .map((ref, index) => {
       const tags = ref.tags.length ? ` | tags: ${ref.tags.slice(0, 4).join("、")}` : ""
-      return `${index + 1}. [${ref.source}/${ref.id}${tags}] ${ref.text}`
+      return `${index + 1}. [${ref.source}/${ref.id}${tags}] ${ref.text.slice(0, 180)}`
     })
     .join("\n")
 }

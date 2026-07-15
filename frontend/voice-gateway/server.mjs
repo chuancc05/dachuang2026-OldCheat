@@ -27,6 +27,8 @@ const ASR_SAMPLE_RATE = Number(process.env.VOICE_ASR_SAMPLE_RATE || 16000)
 const TTS_SAMPLE_RATE = Number(process.env.VOICE_TTS_SAMPLE_RATE || 24000)
 const ASR_VAD_THRESHOLD = Number(process.env.VOICE_ASR_VAD_THRESHOLD || 0.2)
 const ASR_SILENCE_DURATION_MS = Number(process.env.VOICE_ASR_SILENCE_DURATION_MS || 400)
+const TTS_PACKET_DURATION_MS = clampInteger(process.env.VOICE_TTS_PACKET_DURATION_MS, 80, 500, 180)
+const TTS_PACKET_BYTES = Math.max(960, Math.round((TTS_SAMPLE_RATE * 2 * TTS_PACKET_DURATION_MS) / 1000))
 
 if (!API_KEY) {
   console.error("[voice-gateway] Missing DASHSCOPE_API_KEY in environment or frontend/.env.local")
@@ -48,7 +50,7 @@ const server = createServer((req, res) => {
         version: GATEWAY_VERSION,
         protocolVersion: 2,
         asr: { vadThreshold: ASR_VAD_THRESHOLD, silenceDurationMs: ASR_SILENCE_DURATION_MS },
-        tts: { persistentConnection: true },
+        tts: { persistentConnection: true, packetDurationMs: TTS_PACKET_DURATION_MS },
       }),
     )
     return
@@ -131,9 +133,7 @@ async function handleClientEvent(client, session, event) {
       }
       break
     case "asr.stop":
-      if (session.asr?.readyState === WebSocket.OPEN) {
-        session.asr.send(JSON.stringify({ event_id: eventId("asr_finish"), type: "session.finish" }))
-      }
+      resetAsrSession(session)
       break
     case "tts.prepare":
       await ensureTtsSession(client, session, event.voice)
@@ -287,7 +287,16 @@ async function speakText(
     return
   }
 
-  session.ttsActive = { utteranceId, text, done: false, requestedAt: Date.now(), firstAudioReceived: false }
+  session.ttsActive = {
+    utteranceId,
+    text,
+    done: false,
+    requestedAt: Date.now(),
+    firstAudioReceived: false,
+    audioChunks: [],
+    audioBytes: 0,
+    flushTimer: null,
+  }
   sendClient(client, { type: "tts.started", utteranceId, text, voice })
   session.tts.send(JSON.stringify({ event_id: eventId("tts_append"), type: "input_text_buffer.append", text }))
   session.tts.send(JSON.stringify({ event_id: eventId("tts_commit"), type: "input_text_buffer.commit" }))
@@ -369,6 +378,7 @@ function ensureTtsSession(client, session, requestedVoice = "", requestedUrl = T
           utteranceId: active?.utteranceId,
           message: event.error?.message || event.message || "DashScope TTS returned an error",
         })
+        discardTtsAudio(active)
         session.ttsActive = null
         resetTtsSession(session)
         settle()
@@ -382,12 +392,7 @@ function ensureTtsSession(client, session, requestedVoice = "", requestedUrl = T
           active.firstAudioReceived = true
           console.log(`[voice-gateway] TTS first audio after ${Date.now() - active.requestedAt}ms`)
         }
-        sendClient(client, {
-          type: "tts.audio",
-          utteranceId: active.utteranceId,
-          audio,
-          sampleRate: TTS_SAMPLE_RATE,
-        })
+        queueTtsAudio(client, session, active, audio)
         return
       }
 
@@ -408,6 +413,7 @@ function ensureTtsSession(client, session, requestedVoice = "", requestedUrl = T
         utteranceId: active?.utteranceId,
         message: readableError(error),
       })
+      discardTtsAudio(active)
       session.ttsActive = null
       resetTtsSession(session)
       settle()
@@ -418,6 +424,7 @@ function ensureTtsSession(client, session, requestedVoice = "", requestedUrl = T
       const active = session.ttsActive
       session.tts = null
       session.ttsReady = false
+      discardTtsAudio(active)
       session.ttsActive = null
       if (active) {
         sendClient(client, {
@@ -438,6 +445,7 @@ function ensureTtsSession(client, session, requestedVoice = "", requestedUrl = T
 function finishActiveTts(client, session, utteranceId) {
   const active = session.ttsActive
   if (!active || active.done || active.utteranceId !== utteranceId) return
+  flushTtsAudio(client, session, active)
   active.done = true
   session.ttsActive = null
   sendClient(client, { type: "tts.done", utteranceId })
@@ -446,6 +454,7 @@ function finishActiveTts(client, session, utteranceId) {
 function stopTtsSession(client, session, requestedUtteranceId = "") {
   const active = session.ttsActive
   const utteranceId = String(requestedUtteranceId || active?.utteranceId || "").trim()
+  discardTtsAudio(active)
   session.ttsActive = null
   if (utteranceId) sendClient(client, { type: "tts.done", utteranceId })
   resetTtsSession(session)
@@ -453,11 +462,54 @@ function stopTtsSession(client, session, requestedUtteranceId = "") {
 
 function resetTtsSession(session) {
   const socket = session.tts
+  discardTtsAudio(session.ttsActive)
   session.tts = null
   session.ttsReady = false
   session.ttsStarting = null
   session.ttsActive = null
   closeSocket(socket)
+}
+
+function queueTtsAudio(client, session, active, audio) {
+  const chunk = Buffer.from(audio, "base64")
+  if (chunk.length === 0 || session.ttsActive !== active || active.done) return
+
+  active.audioChunks.push(chunk)
+  active.audioBytes += chunk.length
+  if (active.audioBytes >= TTS_PACKET_BYTES) {
+    flushTtsAudio(client, session, active)
+    return
+  }
+
+  if (!active.flushTimer) {
+    active.flushTimer = setTimeout(() => flushTtsAudio(client, session, active), TTS_PACKET_DURATION_MS)
+  }
+}
+
+function flushTtsAudio(client, session, active) {
+  if (active.flushTimer) {
+    clearTimeout(active.flushTimer)
+    active.flushTimer = null
+  }
+  if (session.ttsActive !== active || active.done || active.audioBytes === 0) return
+
+  const audio = Buffer.concat(active.audioChunks, active.audioBytes).toString("base64")
+  active.audioChunks = []
+  active.audioBytes = 0
+  sendClient(client, {
+    type: "tts.audio",
+    utteranceId: active.utteranceId,
+    audio,
+    sampleRate: TTS_SAMPLE_RATE,
+  })
+}
+
+function discardTtsAudio(active) {
+  if (!active) return
+  if (active.flushTimer) clearTimeout(active.flushTimer)
+  active.flushTimer = null
+  active.audioChunks = []
+  active.audioBytes = 0
 }
 
 function resolveTtsVoice(value) {
@@ -517,9 +569,16 @@ function sendClient(client, event) {
 function closeSession(session) {
   if (session.closed) return
   session.closed = true
+  resetAsrSession(session)
+  resetTtsSession(session)
+}
+
+function resetAsrSession(session) {
   closeSocket(session.asr)
   session.asr = null
-  resetTtsSession(session)
+  session.asrReady = false
+  session.asrStarting = false
+  session.lastPartial = ""
 }
 
 function closeSocket(socket) {
@@ -620,6 +679,12 @@ function parseOrigins(value) {
     .split(",")
     .map((origin) => origin.trim().replace(/\/$/u, ""))
     .filter((origin) => /^https?:\/\//iu.test(origin))
+}
+
+function clampInteger(value, min, max, fallback) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return fallback
+  return Math.max(min, Math.min(max, Math.round(parsed)))
 }
 
 function loadLocalEnv(path) {

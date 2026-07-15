@@ -30,7 +30,9 @@ const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:8787/voice"
 const ASR_SAMPLE_RATE = 16000
 const TTS_SAMPLE_RATE = 24000
 const INPUT_BUFFER_SIZE = 2048
-const TTS_START_BUFFER_SECONDS = 0.12
+// Mobile browsers need a modest jitter buffer. The gateway already batches PCM,
+// so this remains short enough to feel like a phone conversation.
+const TTS_START_BUFFER_SECONDS = 0.55
 const TTS_MIN_CHUNK_LEAD_SECONDS = 0.03
 
 export class RealtimeVoiceClient {
@@ -60,6 +62,9 @@ export class RealtimeVoiceClient {
   private preparePromise: Promise<void> | null = null
   private prepareResolve: (() => void) | null = null
   private prepareTimer: number | null = null
+  private asrReadyResolve: (() => void) | null = null
+  private asrReadyReject: ((error: Error) => void) | null = null
+  private asrReadyTimer: number | null = null
   private muted = false
   private listening = false
 
@@ -104,6 +109,7 @@ export class RealtimeVoiceClient {
         this.supportsTtsPrewarm = false
         this.preparedVoice = ""
         this.finishVoicePreparation()
+        this.finishAsrReady(new Error("Voice gateway connection closed"))
         this.stopListening(false)
         this.cancelPlayback(false)
         this.options.onClose?.()
@@ -137,15 +143,32 @@ export class RealtimeVoiceClient {
   async startListening() {
     await this.connect()
     await this.ensureInput()
-    this.listening = true
+    const asrReady = this.waitForAsrReady()
     this.send({ type: "asr.start" })
+    await asrReady
+    this.listening = true
   }
 
-  stopListening(commit = true) {
+  stopListening(commit = true, releaseMedia = true) {
     const wasListening = this.listening
     this.listening = false
+    this.finishAsrReady(new Error("Microphone listening was stopped"))
     if (commit && wasListening) this.send({ type: "asr.stop" })
 
+    this.detachInputNodes()
+    if (!releaseMedia) return
+
+    if (this.stream) {
+      this.stream.getTracks().forEach((track) => track.stop())
+      this.stream = null
+    }
+    if (this.inputContext) {
+      void this.inputContext.close()
+      this.inputContext = null
+    }
+  }
+
+  private detachInputNodes() {
     if (this.processorNode) {
       this.processorNode.disconnect()
       this.processorNode.onaudioprocess = null
@@ -154,14 +177,6 @@ export class RealtimeVoiceClient {
     if (this.sourceNode) {
       this.sourceNode.disconnect()
       this.sourceNode = null
-    }
-    if (this.stream) {
-      this.stream.getTracks().forEach((track) => track.stop())
-      this.stream = null
-    }
-    if (this.inputContext) {
-      void this.inputContext.close()
-      this.inputContext = null
     }
   }
 
@@ -174,7 +189,10 @@ export class RealtimeVoiceClient {
     if (validSegments.length === 0) return
 
     await this.connect()
-    this.stopListening(true)
+    // Keep the microphone track for this call, but stop forwarding audio while
+    // the simulated caller speaks. Reusing it avoids a slow permission/device
+    // reinitialization on every turn, especially on phones.
+    this.stopListening(true, false)
     this.cancelPlayback()
     this.playbackQueue = [...validSegments]
     const firstTts = validSegments.find((segment) => segment.kind === "tts")
@@ -280,15 +298,18 @@ export class RealtimeVoiceClient {
     if (!AudioContextCtor) throw new Error("This browser does not support Web Audio")
     if (!navigator.mediaDevices?.getUserMedia) throw new Error("This browser cannot access the microphone")
 
-    this.stopListening(false)
-    this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-    })
-    this.inputContext = new AudioContextCtor({ sampleRate: ASR_SAMPLE_RATE })
+    this.detachInputNodes()
+    if (!this.stream || !this.inputContext || this.inputContext.state === "closed") {
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      })
+      this.inputContext = new AudioContextCtor({ sampleRate: ASR_SAMPLE_RATE })
+    }
+    if (this.inputContext.state === "suspended") await this.inputContext.resume()
     this.sourceNode = this.inputContext.createMediaStreamSource(this.stream)
     this.processorNode = this.inputContext.createScriptProcessor(INPUT_BUFFER_SIZE, 1, 1)
     const inputRate = this.inputContext.sampleRate
@@ -407,6 +428,7 @@ export class RealtimeVoiceClient {
         this.options.onReady?.()
         break
       case "asr.ready":
+        this.finishAsrReady()
         this.options.onReady?.()
         break
       case "asr.partial":
@@ -484,6 +506,30 @@ export class RealtimeVoiceClient {
     this.preparePromise = null
     this.pendingPrepareVoice = ""
     resolve?.()
+  }
+
+  private waitForAsrReady() {
+    this.finishAsrReady(new Error("ASR session was replaced"))
+    return new Promise<void>((resolve, reject) => {
+      this.asrReadyResolve = resolve
+      this.asrReadyReject = reject
+      this.asrReadyTimer = window.setTimeout(() => {
+        this.finishAsrReady(new Error("Voice recognition connection timed out"))
+      }, 4_000)
+    })
+  }
+
+  private finishAsrReady(error?: Error) {
+    if (this.asrReadyTimer) {
+      window.clearTimeout(this.asrReadyTimer)
+      this.asrReadyTimer = null
+    }
+    const resolve = this.asrReadyResolve
+    const reject = this.asrReadyReject
+    this.asrReadyResolve = null
+    this.asrReadyReject = null
+    if (error) reject?.(error)
+    else resolve?.()
   }
 
   private send(payload: unknown) {

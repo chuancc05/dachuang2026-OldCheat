@@ -6,7 +6,6 @@ import { cn } from "@/lib/utils"
 import type { Scenario } from "@/lib/scenarios"
 import {
   Bot,
-  Ear,
   Loader2,
   Mic,
   Phone,
@@ -75,9 +74,9 @@ const STATUS_COPY: Record<VoiceCallStatus, { title: string; detail: string; icon
     icon: <Volume2 className="size-8" />,
   },
   "listening-user": {
-    title: "请你回答",
-    detail: "直接开口说你的应对，系统会自动识别并提交。",
-    icon: <Ear className="size-8" />,
+    title: "请你回复",
+    detail: "请对着麦克风说出你的应对，系统会自动识别并提交。",
+    icon: <Mic className="size-8" />,
   },
   recognizing: {
     title: "正在识别",
@@ -178,6 +177,12 @@ export function VoiceCallPanel({
               <p className="mt-2 flex items-center gap-1.5 text-sm font-semibold text-primary" role="status">
                 <Volume2 className="size-4" />
                 正在播放对方话术，回复输入已暂时锁定。
+              </p>
+            )}
+            {status === "listening-user" && (
+              <p className="mt-2 flex items-center gap-2 text-base font-bold text-safe" role="status">
+                <Mic className="size-5" />
+                请你回复
               </p>
             )}
             {scenario && (
