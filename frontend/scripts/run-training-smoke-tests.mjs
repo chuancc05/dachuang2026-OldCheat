@@ -66,6 +66,15 @@ check("训练对话 API 具备模型失败时的场景库兜底", () => {
   assert.match(route, /catch \(error\)[\s\S]{0,900}fallbackTurn\(/u, "训练对话 API 未在失败时进入 fallback")
 })
 
+check("DeepSeek V4 对话与报告使用非思考模式返回最终内容", () => {
+  const chatRoute = readText("app/api/training-chat/route.ts")
+  const reportRoute = readText("app/api/training-report/route.ts")
+  const nonThinkingPattern = /thinking:\s*\{\s*type:\s*"disabled"\s*\}/u
+  assert.match(chatRoute, nonThinkingPattern, "训练对话未关闭 V4 默认思考模式，短 token 预算可能只返回 reasoning_content")
+  assert.match(reportRoute, nonThinkingPattern, "训练报告未关闭 V4 默认思考模式")
+  assert.match(reportRoute, /response_format:\s*\{\s*type:\s*"json_object"\s*\}/u, "训练报告未要求 JSON 输出")
+})
+
 check("故事变体覆盖全部场景且训练、模型和报告共享剧本卡", () => {
   const variants = readJson(path.join(frontendRoot, "data", "story-variants.json")).variants
   assert.equal(variants.length, 42, "应提供 14×3 个种子故事变体")

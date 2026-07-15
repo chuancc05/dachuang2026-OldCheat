@@ -144,6 +144,8 @@ async function askDeepSeekReport(body: ReportRequest): Promise<AiReport> {
           { role: "system", content: "你只输出合法 JSON。" },
           { role: "user", content: buildPrompt(body) },
         ],
+        thinking: { type: "disabled" },
+        response_format: { type: "json_object" },
         stream: false,
         temperature: 0.45,
         max_tokens: 900,

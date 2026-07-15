@@ -298,6 +298,10 @@ async function askDeepSeek(
       body: JSON.stringify({
         model: deepSeekDialogModel(),
         messages: buildMessages(scenario, messages, userText, turnIndex, ragContext, realtimeVoice),
+        // DeepSeek V4 defaults to thinking mode. These short dialogue turns need
+        // the final content immediately; otherwise the small token budget can be
+        // consumed by reasoning_content and leave content empty.
+        thinking: { type: "disabled" },
         stream: false,
         temperature: 1.1,
         max_tokens: realtimeVoice ? 88 : 120,
@@ -308,8 +312,15 @@ async function askDeepSeek(
     if (!response.ok) throw new Error(`DeepSeek returned ${response.status}`)
 
     const data = await response.json()
-    const content = sanitizeAiText(data?.choices?.[0]?.message?.content ?? "")
-    if (!content) throw new Error("DeepSeek returned empty content")
+    const message = data?.choices?.[0]?.message
+    const content = sanitizeAiText(message?.content ?? "")
+    if (!content) {
+      const reasoningLength = String(message?.reasoning_content ?? "").length
+      const finishReason = String(data?.choices?.[0]?.finish_reason ?? "unknown")
+      throw new Error(
+        `DeepSeek returned empty content (finish=${finishReason}, reasoningChars=${reasoningLength})`,
+      )
+    }
     return content
   })
 }
