@@ -27,7 +27,20 @@ const SCENE_VOICE_BY_CODE: Record<string, ScenarioVoice> = {
   "SC-14": { voice: "Vincent", label: "勒索压迫男声" },
 }
 
+const PROFILE_VOICE: Record<string, ScenarioVoice> = {
+  "young-female": { voice: "Mia", label: "年轻女性声" },
+  "young-male": { voice: "Kai", label: "年轻男性声" },
+  "adult-female": { voice: "Maia", label: "成年女性声" },
+  "adult-male": { voice: "Moon", label: "成年男性声" },
+  "senior-female": { voice: "Serena", label: "老年女性声" },
+  "senior-male": { voice: "Vincent", label: "老年男性声" },
+}
+
 export function getScenarioVoice(scenario: Scenario | null): ScenarioVoice {
   if (!scenario) return DEFAULT_SCENARIO_VOICE
+  const profile = scenario.variant?.identityContract.caller.voiceProfile
+  if (profile && profile !== "scenario-default" && PROFILE_VOICE[profile]) {
+    return PROFILE_VOICE[profile]
+  }
   return SCENE_VOICE_BY_CODE[scenario.code] ?? DEFAULT_SCENARIO_VOICE
 }

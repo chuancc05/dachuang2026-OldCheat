@@ -3,6 +3,7 @@ from typing import Any, Iterator, List, Dict, Optional
 from app.config import DEFAULT_MODEL, MAX_CONTEXT_MESSAGES, OLLAMA_URL
 from app.core.prompt_builder import PromptBuilder
 from app.core.ollama_client import OllamaClient
+from app.core.scenario_identity import safe_variant_reply
 
 class DialogueManager:
     """
@@ -76,11 +77,12 @@ class DialogueManager:
             warning_msg = "\n【系统安全提示】：请注意，您正在进行防诈骗模拟训练，当前对话为 AI 模拟。请勿在任何真实场景中透露个人敏感信息或进行转账。\n"
             yield warning_msg
 
-        # 4. 获取并流式输出 AI 响应
+        # 4. 先完整收集响应，身份校验通过后再展示，避免错误称谓已流到页面。
         full_response = ""
         for chunk in self.client.chat_stream(self._messages_for_model()):
             full_response += chunk
-            yield chunk
+        full_response = safe_variant_reply(self.story_variant, full_response, len(self.messages))
+        yield full_response
 
         # 5. 将完整的 AI 响应加入历史记录
         self.messages.append({"role": "assistant", "content": full_response})

@@ -17,6 +17,8 @@ for (let index = 1; index <= 14; index += 1) {
     assert.ok(!ids.has(variant.id), `${variant.id} 重复`); ids.add(variant.id)
     for (const field of ["title", "persona", "source", "premise", "objective", "opening"]) assert.ok(String(variant[field] ?? "").trim(), `${variant.id} 缺少 ${field}`)
     assert.ok(variant.pressureTactics?.length, `${variant.id} 缺少压力手法`); assert.ok(variant.fallbackLines?.length, `${variant.id} 缺少 fallback`)
+    assert.ok(variant.identityContract?.trainee?.address === "您", `${variant.id} 缺少中性受训者身份契约`)
+    assert.ok(variant.identityContract?.caller?.role, `${variant.id} 缺少来电人身份契约`)
     assert.equal(unsafe.test([variant.opening, ...variant.fallbackLines].join(" ")), false, `${variant.id} 包含疑似真实敏感内容`)
   }
 }

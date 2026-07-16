@@ -2,6 +2,14 @@ import { NextRequest, NextResponse } from "next/server"
 import type { Message } from "@/components/training/simulation-stage"
 import type { Scenario, ScriptTurn } from "@/lib/scenarios"
 import { formatRagReferences, retrieveRagContext, type RagContext } from "@/lib/rag"
+import {
+  findIdentityConflicts,
+  identityCorrectionPrompt,
+  identityPromptLines,
+  normalizeIdentityContract,
+  sanitizeIdentityText,
+  sanitizeRagContextForIdentity,
+} from "@/lib/scenario-identity.mjs"
 import { audioCuePrompt, createAudioTurn } from "@/lib/voice/scenario-audio"
 
 interface ChatRequest {
@@ -82,6 +90,10 @@ function ollamaModel(): string {
   return envValue("OLLAMA_MODEL") || envValue("DEFAULT_MODEL") || "qwen2:7b"
 }
 
+function identityCorrectionEnabled(): boolean {
+  return envValue("IDENTITY_CORRECTION_ENABLED").toLowerCase() !== "false"
+}
+
 function normalizeProvider(value?: string): AiProvider {
   const normalized = value?.trim().toLowerCase()
   if (normalized === "deepseek" || normalized === "ollama" || normalized === "auto") {
@@ -120,7 +132,8 @@ function buildCoach(trigger: string): string {
 }
 
 function fixedPersonaName(scenario: Scenario): string {
-  if (scenario.variant?.persona) return scenario.variant.persona
+  const contractName = scenario.variant?.identityContract.caller.displayName?.trim()
+  if (contractName) return contractName
   const persona = scenario.persona || ""
   const afterDot = persona.includes("·") ? persona.split("·").pop()?.trim() ?? "" : ""
   const afterQuote = persona.match(/」\s*(.+)$/u)?.[1]?.trim() ?? ""
@@ -129,8 +142,10 @@ function fixedPersonaName(scenario: Scenario): string {
 }
 
 function buildIdentityRules(scenario: Scenario): string[] {
+  const contract = normalizeIdentityContract(scenario.variant?.identityContract, scenario.variant ?? { persona: scenario.persona })
   const fixedName = fixedPersonaName(scenario)
   const rules = [
+    ...identityPromptLines(contract),
     `Fixed caller/persona shown to the trainee: ${scenario.persona}.`,
     "Keep identity consistent across every turn. Do not invent a different caller name, job title, relative, or organization.",
   ]
@@ -171,8 +186,13 @@ function normalizeAiIdentity(line: string, scenario: Scenario): string {
 }
 
 function fallbackTurn(scenario: Scenario, turnIndex: number): ScriptTurn {
-  const fallback = scenario.script[turnIndex % Math.max(scenario.script.length, 1)]
-  if (fallback) return fallback
+  const identity = normalizeIdentityContract(scenario.variant?.identityContract, scenario.variant ?? { persona: scenario.persona })
+  for (let offset = 0; offset < scenario.script.length; offset += 1) {
+    const fallback = scenario.script[(turnIndex + offset) % scenario.script.length]
+    if (!fallback) continue
+    const safe = sanitizeIdentityText(fallback.line, identity)
+    if (safe.valid) return { ...fallback, line: safe.text }
+  }
 
   const trigger = pickTrigger(scenario, scenario.method, turnIndex)
   return {
@@ -376,17 +396,40 @@ async function generateAiLine(
   realtimeVoice = false,
 ): Promise<{ line: string; source: Exclude<AiSource, "fallback">; errors: string[] }> {
   const errors: string[] = []
+  const identity = normalizeIdentityContract(scenario.variant?.identityContract, scenario.variant ?? { persona: scenario.persona })
 
   for (const provider of providerOrder()) {
     try {
-      const line =
+      const candidate =
         provider === "deepseek"
           ? await askDeepSeek(scenario, messages, userText, turnIndex, ragContext, realtimeVoice)
           : await askOllama(scenario, messages, userText, turnIndex, ragContext, realtimeVoice)
-      return { line, source: provider, errors }
+      const normalized = sanitizeIdentityText(normalizeAiIdentity(candidate, scenario), identity)
+      if (normalized.valid) return { line: normalized.text, source: provider, errors }
+
+      if (!identityCorrectionEnabled()) {
+        throw new Error(`Identity correction failed: disabled; ${normalized.conflicts.join("、")}`)
+      }
+
+      const correctionRequest = [
+        `Previous candidate: ${normalized.text}`,
+        identityCorrectionPrompt(normalized.conflicts, identity),
+      ].join("\n")
+      let correctedCandidate: string
+      try {
+        correctedCandidate = provider === "deepseek"
+          ? await askDeepSeek(scenario, messages, correctionRequest, turnIndex, ragContext, realtimeVoice)
+          : await askOllama(scenario, messages, correctionRequest, turnIndex, ragContext, realtimeVoice)
+      } catch (error) {
+        throw new Error(`Identity correction failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      const corrected = sanitizeIdentityText(normalizeAiIdentity(correctedCandidate, scenario), identity)
+      if (corrected.valid) return { line: corrected.text, source: provider, errors }
+      throw new Error(`Identity correction failed: ${findIdentityConflicts(corrected.text, identity).join("、")}`)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       errors.push(`${provider}: ${message}`)
+      if (message.startsWith("Identity correction failed:")) break
     }
   }
 
@@ -405,11 +448,13 @@ export async function POST(request: NextRequest) {
   if (!scenario || !userText.trim()) {
     return NextResponse.json({ error: "Missing scenario or userText" }, { status: 400 })
   }
-  const ragContext = await retrieveRagContext(scenario, messages, userText.trim())
+  const identity = normalizeIdentityContract(scenario.variant?.identityContract, scenario.variant ?? { persona: scenario.persona })
+  const retrievedRagContext = await retrieveRagContext(scenario, messages, userText.trim())
+  const ragContext = sanitizeRagContextForIdentity(retrievedRagContext, identity) as RagContext
 
   try {
     const result = await generateAiLine(scenario, messages, userText.trim(), turnIndex, ragContext, realtimeVoice)
-    const audioTurn = createAudioTurn(scenario, normalizeAiIdentity(result.line, scenario), turnIndex)
+    const audioTurn = createAudioTurn(scenario, result.line, turnIndex)
     const trigger = pickTrigger(scenario, audioTurn.line, turnIndex)
     return NextResponse.json({
       line: audioTurn.line,

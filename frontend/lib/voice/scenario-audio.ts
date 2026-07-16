@@ -1,4 +1,6 @@
 import type { Scenario } from "@/lib/scenarios"
+import { normalizeIdentityContract } from "@/lib/scenario-identity.mjs"
+import type { SessionIdentityContract } from "@/lib/story-variants"
 import { stripSpeechCues } from "@/lib/speech-text"
 
 export type AudioCueId =
@@ -25,6 +27,7 @@ export type AudioCue = {
     instructions: string
     fallbackSrc?: string
   }
+  introText?: string
 }
 
 export type AudioTurn = {
@@ -147,18 +150,42 @@ const CUES: CueDefinition[] = [
     id: "relative-distress",
     marker: "relative_distress",
     scenarios: ["SC-14"],
-    labels: ["电话杂音", "模糊碰撞", "亲属求救"],
+    labels: ["电话杂音", "模糊碰撞"],
     assetPaths: ["/audio-cues/phone-noise.wav", "/audio-cues/muffled-impact.wav"],
-    dynamicSpeech: {
-      text: "妈，救我……别转钱！",
-      voice: "Mia",
-      instructions: "年轻女声，声音颤抖、急促、带轻微哭腔；不要尖叫，不要夸张表演，不要读出任何提示词。",
-      fallbackSrc: "/audio-cues/relative-distress-backup.wav",
-    },
     minTurn: 2,
     autoMatch: /听听.*(?:声音|动静)|给你听|听清楚|哭声|哭喊|求救|亲属.*(?:安全|受伤|声音)|孩子.*(?:安全|受伤|声音)/u,
   },
 ]
+
+function resolvedCue(cue: CueDefinition, scenario: Scenario): CueDefinition {
+  if (cue.id !== "relative-distress") return cue
+  const identity = normalizeIdentityContract(
+    scenario.variant?.identityContract,
+    scenario.variant ?? { persona: scenario.persona },
+  ) as SessionIdentityContract
+  const distress = identity.distressCue
+  if (!distress?.enabled || distress.fallbackMode !== "speech") {
+    return { ...cue, labels: ["电话杂音", "模糊碰撞"], dynamicSpeech: undefined, introText: undefined }
+  }
+  const subject = [identity.subject.relation, identity.subject.name].filter(Boolean).join("") || "亲属"
+  return {
+    ...cue,
+    labels: ["电话杂音", "模糊碰撞", `${subject}求救`],
+    introText: `你听听你${subject}的声音。`,
+    dynamicSpeech: {
+      text: distress.text,
+      voice: distress.voice,
+      instructions: distress.instructions,
+      fallbackSrc: "/audio-cues/relative-distress-backup.wav",
+    },
+  }
+}
+
+function availableCues(scenario: Scenario, turnIndex: number): CueDefinition[] {
+  return CUES
+    .filter((cue) => cue.scenarios.includes(scenario.code) && turnIndex >= (cue.minTurn ?? 0))
+    .map((cue) => resolvedCue(cue, scenario))
+}
 
 const AUDIO_MARKER = /\[AUDIO:([a-z0-9_-]+)\]/giu
 export function stripAudioCueMarkers(value: string): string {
@@ -166,7 +193,7 @@ export function stripAudioCueMarkers(value: string): string {
 }
 
 export function audioCuePrompt(scenario: Scenario, turnIndex: number): string[] {
-  const available = CUES.filter((cue) => cue.scenarios.includes(scenario.code) && turnIndex >= (cue.minTurn ?? 0))
+  const available = availableCues(scenario, turnIndex)
   if (available.length === 0) return []
 
   return [
@@ -180,7 +207,7 @@ export function audioCuePrompt(scenario: Scenario, turnIndex: number): string[] 
 export function createAudioTurn(scenario: Scenario, rawLine: string, turnIndex: number): AudioTurn {
   const markerNames = [...rawLine.matchAll(AUDIO_MARKER)].map((match) => match[1].toLowerCase())
   const cleanLine = stripAudioCueMarkers(rawLine)
-  const available = CUES.filter((cue) => cue.scenarios.includes(scenario.code) && turnIndex >= (cue.minTurn ?? 0))
+  const available = availableCues(scenario, turnIndex)
   const marked = available.filter((cue) => markerNames.includes(cue.marker))
   const automatic = marked.length > 0
     ? marked
@@ -197,7 +224,7 @@ export function buildVoicePlaybackSegments(
   defaultVoice: string,
 ): VoicePlaybackSegment[] {
   const relativeDistress = turn.cues.find((cue) => cue.id === "relative-distress")
-  if (!relativeDistress) {
+  if (!relativeDistress || !relativeDistress.dynamicSpeech) {
     const speechLine = stripSpeechCues(turn.line)
     return [
       ...turn.cues.flatMap((cue) => cue.assetPaths.map((src) => ({ kind: "asset" as const, src }))),
@@ -205,7 +232,7 @@ export function buildVoicePlaybackSegments(
     ]
   }
 
-  const { intro, followup } = splitRelativeDistressLine(turn.line)
+  const { intro, followup } = splitRelativeDistressLine(turn.line, relativeDistress.introText)
   return [
     ...(intro ? [{ kind: "tts" as const, text: intro, voice: defaultVoice }] : []),
     ...relativeDistress.assetPaths.map((src) => ({ kind: "asset" as const, src })),
@@ -222,10 +249,10 @@ export function buildVoicePlaybackSegments(
   ]
 }
 
-function splitRelativeDistressLine(line: string): { intro: string; followup: string } {
+function splitRelativeDistressLine(line: string, fallbackIntro?: string): { intro: string; followup: string } {
   const match = line.match(/^(.*?(?:听听|听一下|给你听|听清楚)[^。！？!?，,]{0,32}(?:声音|动静|证据)?[。！？!?，,]?)(.*)$/u)
   if (!match) {
-    return { intro: "你听听你家人的声音。", followup: stripSpeechCues(line) }
+    return { intro: fallbackIntro || "你听听动静。", followup: stripSpeechCues(line) }
   }
   return {
     intro: stripSpeechCues(match[1].trim()),

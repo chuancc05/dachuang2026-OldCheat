@@ -88,6 +88,27 @@ check("故事变体覆盖全部场景且训练、模型和报告共享剧本卡"
   assert.match(report, /scenario\.variant/u, "报告没有记录故事变体")
 })
 
+check("身份契约隔离 RAG、模型、兜底与语音音色", () => {
+  const identity = readText("lib/scenario-identity.mjs")
+  const chat = readText("app/api/training-chat/route.ts")
+  const report = readText("app/api/training-report/route.ts")
+  const selector = readText("lib/story-variant-selector.mjs")
+  const audio = readText("lib/voice/scenario-audio.ts")
+  const voices = readText("lib/voice/scenario-voices.ts")
+
+  assert.match(identity, /RELATION_TERMS/u, "身份质检缺少关系称谓规则")
+  assert.match(identity, /KNOWN_CALLER_NAMES/u, "身份质检缺少来电人姓名规则")
+  assert.match(identity, /sanitizeRagContextForIdentity/u, "身份质检缺少 RAG 净化器")
+  assert.match(chat, /sanitizeRagContextForIdentity/u, "训练对话未在 RAG 注入前净化身份")
+  assert.match(chat, /identityCorrectionPrompt/u, "训练对话未在模型回复冲突时请求纠正")
+  assert.match(chat, /IDENTITY_CORRECTION_ENABLED/u, "身份纠正缺少可关闭的稳定性开关")
+  assert.match(report, /findIdentityConflicts/u, "训练报告未拦截身份冲突内容")
+  assert.match(selector, /sanitizeIdentityText/u, "场景库兜底未净化身份冲突文本")
+  assert.match(audio, /identityContract/u, "场景语音没有读取锁定身份")
+  assert.match(voices, /identityContract\.caller\.voiceProfile/u, "场景音色没有读取锁定音色档案")
+  assert.doesNotMatch(audio, /妈，救我/u, "场景语音仍硬编码了错误的亲属称谓")
+})
+
 check("故事变体管理接口保护写入并保留种子降级", () => {
   const route = readText("app/api/story-variants/route.ts")
   const store = readText("lib/story-variant-store.ts")

@@ -19,6 +19,7 @@ from app.config import DATA_DIR, WHISPER_MODEL
 from app.core import DialogueManager, SCENES
 from app.core.material_library import choose_material_reply
 from app.core.story_variants import choose_story_variant
+from app.core.scenario_identity import safe_variant_reply
 from app.database import db
 from app.psychology import DIMENSIONS, FraudDetector, PsychologyAnalyzer, ScoreTracker
 from app.report.pdf_generator import PDFReportGenerator
@@ -212,26 +213,26 @@ def _advice_markdown(state: Dict[str, Any]) -> str:
 def _fallback_ai_reply(scene_id: str, user_text: str, story_variant: Dict[str, Any] | None = None, round_number: int = 1) -> str:
     scene = SCENES[scene_id]
     if any(word in user_text for word in ["骗子", "报警", "不信", "挂了", "核实"]):
-        return "您的警惕性很强。训练到这里可以停一下：遇到可疑要求，先挂断并通过官方渠道核实。"
+        return safe_variant_reply(story_variant, "您的警惕性很强。训练到这里可以停一下：遇到可疑要求，先挂断并通过官方渠道核实。", round_number - 1)
     variant_fallback = story_variant.get("fallbackLines", []) if story_variant else []
     if variant_fallback:
-        return str(variant_fallback[(max(1, round_number) - 1) % len(variant_fallback)])
+        return safe_variant_reply(story_variant, str(variant_fallback[(max(1, round_number) - 1) % len(variant_fallback)]), round_number - 1)
     material_reply = choose_material_reply(scene_id, user_text)
     if material_reply:
-        return material_reply
+        return safe_variant_reply(story_variant, material_reply, round_number - 1)
     if scene_id == "SC-01":
-        return "我是办案人员，现在情况比较紧急。为了核实账户安全，请您先不要告诉家里人，按我说的步骤配合登记。"
+        return safe_variant_reply(story_variant, "我是办案人员，现在情况比较紧急。为了核实账户安全，请您先不要告诉家里人，按我说的步骤配合登记。", round_number - 1)
     if scene_id == "SC-06":
-        return "妈，我这边真的很急，原来的手机坏了。这个事情先别打别的电话，能不能先帮我处理一下费用？"
-    return f"您先别着急，我这里是{scene.name}相关的专员。这个机会有时间限制，请您先按我说的确认一下。"
+        return safe_variant_reply(story_variant, "妈，我这边真的很急，原来的手机坏了。这个事情先别打别的电话，能不能先帮我处理一下费用？", round_number - 1)
+    return safe_variant_reply(story_variant, f"您先别着急，我这里是{scene.name}相关的专员。这个机会有时间限制，请您先按我说的确认一下。", round_number - 1)
 
 
 def _initial_ai_message(scene_id: str, story_variant: Dict[str, Any] | None = None) -> str:
     if story_variant and str(story_variant.get("opening", "")).strip():
-        return str(story_variant["opening"]).strip()
+        return safe_variant_reply(story_variant, str(story_variant["opening"]).strip())
     scene = SCENES.get(scene_id)
     if scene and scene.openings:
-        return random.choice(scene.openings)
+        return safe_variant_reply(story_variant, random.choice(scene.openings))
 
     openings = {
         "SC-01": [
@@ -265,7 +266,10 @@ def _initial_ai_message(scene_id: str, story_variant: Dict[str, Any] | None = No
             "妈，我这边出了点急事，原来的微信登不上了。您先别问太多，能不能先按我说的处理一下？",
         ],
     }
-    return random.choice(openings.get(scene_id, ["您好，我这边有一件比较重要的事情需要和您确认一下，麻烦您先听我说。"]))
+    return safe_variant_reply(
+        story_variant,
+        random.choice(openings.get(scene_id, ["您好，我这边有一件比较重要的事情需要和您确认一下，麻烦您先听我说。"])),
+    )
 
 
 def _new_empty_state() -> Dict[str, Any]:

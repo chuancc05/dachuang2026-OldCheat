@@ -9,6 +9,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List
 
+from app.core.scenario_identity import normalize_story_variant
+
 logger = logging.getLogger(__name__)
 _last_selected: Dict[str, str] = {}
 
@@ -18,7 +20,15 @@ def load_story_variants() -> List[Dict[str, Any]]:
     path = Path(__file__).resolve().parents[2] / "frontend" / "data" / "story-variants.json"
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return [item for item in payload.get("variants", []) if isinstance(item, dict) and item.get("enabled") is True and str(item.get("id", "")).startswith(f"{item.get('scenarioCode', '')}-V") and str(item.get("opening", "")).strip()]
+        variants = []
+        for item in payload.get("variants", []):
+            if not (isinstance(item, dict) and item.get("enabled") is True and str(item.get("id", "")).startswith(f"{item.get('scenarioCode', '')}-V") and str(item.get("opening", "")).strip()):
+                continue
+            try:
+                variants.append(normalize_story_variant(item))
+            except ValueError as exc:
+                logger.warning("排除身份契约无效的故事变体: %s", exc)
+        return variants
     except Exception as exc:
         logger.warning("故事变体加载失败，继续使用原场景: %s", exc)
         return []

@@ -123,6 +123,7 @@ export function ReportDialog({
             persona: scenario.variant.persona,
             premise: scenario.variant.premise,
             objective: scenario.variant.objective,
+            identityContract: scenario.variant.identityContract,
           } : undefined,
         },
         metrics: {

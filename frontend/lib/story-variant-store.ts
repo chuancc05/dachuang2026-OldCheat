@@ -4,7 +4,13 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { getStore } from "@netlify/blobs"
 import seedLibrary from "@/data/story-variants.json"
-import { validateStoryVariantLibrary, type StoryVariant, type StoryVariantLibrary } from "@/lib/story-variants"
+import {
+  normalizeStoryVariant,
+  normalizeStoryVariantLibrary,
+  validateStoryVariantLibrary,
+  type StoryVariant,
+  type StoryVariantLibrary,
+} from "@/lib/story-variants"
 
 const STORE_NAME = "oldcheat-story-variants"
 const STORE_KEY = "library-v1"
@@ -22,9 +28,10 @@ function cloneSeed(): StoryVariantLibrary {
 }
 
 function checkedLibrary(value: unknown): StoryVariantLibrary {
-  const validation = validateStoryVariantLibrary(value)
+  const normalized = normalizeStoryVariantLibrary(value)
+  const validation = validateStoryVariantLibrary(normalized)
   if (!validation.valid) throw new Error(validation.errors.slice(0, 6).join(" "))
-  return value as StoryVariantLibrary
+  return normalized
 }
 
 function isNetlifyBlobsRuntime(): boolean {
@@ -74,11 +81,11 @@ export async function upsertStoryVariant(variant: StoryVariant): Promise<StoryVa
   const current = await readStoryVariantLibrary()
   const index = current.library.variants.findIndex((item) => item.id === variant.id)
   const variants = [...current.library.variants]
-  const next = {
+  const next = normalizeStoryVariant({
     ...variant,
     version: index >= 0 ? variants[index].version + 1 : Math.max(1, variant.version),
     updatedAt: new Date().toISOString(),
-  }
+  })
   if (index >= 0) variants[index] = next
   else variants.push(next)
   const library = { version: current.library.version + 1, variants }

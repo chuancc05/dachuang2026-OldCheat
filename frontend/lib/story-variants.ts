@@ -1,4 +1,39 @@
 export { applyStoryVariant, selectStoryVariant } from "@/lib/story-variant-selector.mjs"
+import {
+  normalizeIdentityContract,
+  sanitizeIdentityText,
+  validateIdentityContract,
+} from "@/lib/scenario-identity.mjs"
+
+export type IdentityGender = "unknown" | "female" | "male"
+export type IdentityAgeGroup = "unknown" | "young" | "adult" | "senior"
+
+export interface SessionIdentityContract {
+  version: number
+  trainee: { gender: IdentityGender; address: string }
+  caller: {
+    role: string
+    displayName: string
+    gender: IdentityGender
+    voiceProfile: string
+  }
+  subject: {
+    kind: "account" | "relative" | "event"
+    relation: string
+    name: string
+    gender: IdentityGender
+    ageGroup: IdentityAgeGroup
+    aliases: string[]
+  }
+  forbiddenTerms: string[]
+  distressCue?: {
+    enabled: boolean
+    text: string
+    voice: string
+    instructions: string
+    fallbackMode: "speech" | "ambient-only" | "skip"
+  }
+}
 
 export interface StoryVariant {
   id: string
@@ -11,6 +46,7 @@ export interface StoryVariant {
   pressureTactics: string[]
   opening: string
   fallbackLines: string[]
+  identityContract: SessionIdentityContract
   enabled: boolean
   version: number
   updatedAt: string
@@ -24,6 +60,10 @@ export interface StoryVariantLibrary {
 export interface StoryVariantValidation {
   valid: boolean
   errors: string[]
+}
+
+export function createDefaultIdentityContract(persona = "诈骗情境来电人"): SessionIdentityContract {
+  return normalizeIdentityContract(undefined, { persona }) as SessionIdentityContract
 }
 
 const SCENARIO_CODE = /^SC-(0[1-9]|1[0-4])$/u
@@ -76,7 +116,31 @@ export function validateStoryVariant(value: unknown): StoryVariantValidation {
   }
   if (!Number.isInteger(variant.version) || Number(variant.version) < 1) errors.push("版本号必须是正整数。")
   if (Number.isNaN(Date.parse(normalized(variant.updatedAt)))) errors.push("更新时间必须是 ISO 8601 时间。")
+  const identityValidation = validateIdentityContract(variant.identityContract, variant)
+  identityValidation.errors.forEach((error: string) => errors.push(`身份契约：${error}`))
   return { valid: errors.length === 0, errors }
+}
+
+export function normalizeStoryVariant(value: StoryVariant): StoryVariant {
+  const identityContract = normalizeIdentityContract(value.identityContract, value) as SessionIdentityContract
+  const opening = sanitizeIdentityText(value.opening, identityContract)
+  const fallbackLines = value.fallbackLines.map((line) => sanitizeIdentityText(line, identityContract).text)
+  return {
+    ...value,
+    opening: opening.text,
+    fallbackLines,
+    identityContract,
+  }
+}
+
+export function normalizeStoryVariantLibrary(value: unknown): StoryVariantLibrary {
+  if (!value || typeof value !== "object") throw new Error("变体库必须是对象。")
+  const library = value as Partial<StoryVariantLibrary>
+  if (!Array.isArray(library.variants)) throw new Error("变体库缺少 variants 数组。")
+  return {
+    version: Number.isInteger(library.version) ? Number(library.version) : 1,
+    variants: library.variants.map((variant) => normalizeStoryVariant(variant)),
+  }
 }
 
 export function validateStoryVariantLibrary(value: unknown): StoryVariantValidation {

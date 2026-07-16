@@ -1,5 +1,10 @@
 from typing import Any, Dict, Optional
 from app.core.scene_definitions import SceneDefinition, SCENES
+from app.core.scenario_identity import (
+    identity_prompt_lines,
+    normalize_identity_contract,
+    sanitize_identity_text,
+)
 
 class PromptBuilder:
     @staticmethod
@@ -12,9 +17,19 @@ class PromptBuilder:
             raise ValueError(f"未找到场景 ID: {scene_id}")
 
         difficulty = custom_difficulty if custom_difficulty else scene.difficulty
+        identity_contract = normalize_identity_contract(story_variant) if story_variant else None
         material_prompt = ""
         if scene.typical_lines:
-            examples = "\n".join([f"- {line}" for line in scene.typical_lines[:5]])
+            safe_examples = []
+            for line in scene.typical_lines:
+                if identity_contract:
+                    line, conflicts = sanitize_identity_text(line, identity_contract)
+                    if conflicts:
+                        continue
+                safe_examples.append(line)
+                if len(safe_examples) >= 5:
+                    break
+            examples = "\n".join([f"- {line}" for line in safe_examples])
             material_prompt = (
                 "\n"
                 "本场景有以下来自已复核诈骗语料的参考话术特征。你可以参考其语气、节奏和风险点，"
@@ -24,6 +39,7 @@ class PromptBuilder:
 
         variant_prompt = ""
         if story_variant:
+            identity_prompt = "\n".join(identity_prompt_lines(identity_contract or {}))
             variant_prompt = (
                 "\n本次训练已锁定以下故事剧本卡，其事实优先于参考语料，整场不得换人物或改事件：\n"
                 f"- 变体：{story_variant.get('title', '')}（{story_variant.get('id', '')}）\n"
@@ -31,6 +47,7 @@ class PromptBuilder:
                 f"- 事件：{story_variant.get('premise', '')}\n"
                 f"- 模拟目标：{story_variant.get('objective', '')}\n"
                 f"- 压力手法：{'、'.join(story_variant.get('pressureTactics', []))}\n"
+                f"{identity_prompt}\n"
             )
 
         base_prompt = (

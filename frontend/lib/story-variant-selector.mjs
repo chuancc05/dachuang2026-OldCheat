@@ -21,25 +21,31 @@ export function selectStoryVariant(variants, scenarioCode, recentIds = [], rando
   return safeCandidates[index] ?? null
 }
 
+import { normalizeIdentityContract, sanitizeIdentityText } from "./scenario-identity.mjs"
+
 function fallbackTurns(variant, scenario) {
   const original = scenario.script
   const openingTurn = original[0]
+  const identityContract = normalizeIdentityContract(variant.identityContract, variant)
+  const openingText = sanitizeIdentityText(variant.opening, identityContract)
   const opening = {
-    line: variant.opening,
+    line: openingText.valid ? openingText.text : "您好，请先听我说明情况。",
     trigger: variant.pressureTactics[0] ?? openingTurn?.trigger,
     riskDelta: openingTurn?.riskDelta ?? 2,
     coach: openingTurn?.coach ?? "先核实对方身份，不透露信息，不点击链接，不转账。",
   }
-  const fallback = variant.fallbackLines.map((line, index) => {
+  const fallback = variant.fallbackLines.flatMap((line, index) => {
     const base = original[Math.min(index + 1, Math.max(original.length - 1, 0))]
-    return {
-      line,
+    const safe = sanitizeIdentityText(line, identityContract)
+    if (!safe.valid) return []
+    return [{
+      line: safe.text,
       trigger: variant.pressureTactics[(index + 1) % variant.pressureTactics.length] ?? base?.trigger,
       riskDelta: base?.riskDelta ?? Math.min(4.5, 2 + index * 0.4),
       coach: base?.coach ?? "遇到催促、保密或资金要求时，先挂断并通过官方渠道核实。",
-    }
+    }]
   })
-  return [opening, ...fallback, ...original.slice(Math.min(fallback.length + 1, original.length))]
+  return [opening, ...fallback]
 }
 
 export function applyStoryVariant(scenario, variant) {
@@ -50,6 +56,11 @@ export function applyStoryVariant(scenario, variant) {
     tagline: variant.premise,
     method: Array.from(new Set([...variant.pressureTactics, scenario.method])).join(" + "),
     script: fallbackTurns(variant, scenario),
-    variant: { ...variant, pressureTactics: [...variant.pressureTactics], fallbackLines: [...variant.fallbackLines] },
+    variant: {
+      ...variant,
+      pressureTactics: [...variant.pressureTactics],
+      fallbackLines: [...variant.fallbackLines],
+      identityContract: normalizeIdentityContract(variant.identityContract, variant),
+    },
   }
 }

@@ -1,4 +1,11 @@
 import { NextRequest, NextResponse } from "next/server"
+import {
+  findIdentityConflicts,
+  identityPromptLines,
+  normalizeIdentityContract,
+  sanitizeIdentityText,
+} from "@/lib/scenario-identity.mjs"
+import type { SessionIdentityContract } from "@/lib/story-variants"
 
 interface ReportEvent {
   turn: number
@@ -26,6 +33,7 @@ interface ReportRequest {
       persona?: string
       premise?: string
       objective?: string
+      identityContract?: SessionIdentityContract
     }
   }
   metrics: {
@@ -74,23 +82,31 @@ function deepSeekReportModel(): string {
   return envValue("DEEPSEEK_MODEL_REPORT") || envValue("DEEPSEEK_MODEL_DIALOG") || "deepseek-v4-flash"
 }
 
-function compactEvents(events: ReportEvent[]) {
-  return events.slice(0, 16).map((event) => ({
-    turn: event.turn,
-    scammerText: event.scammerText.slice(0, 140),
-    userText: event.userText.slice(0, 120),
-    trigger: event.trigger,
-    evaluation: event.evaluation,
-    reason: event.reason,
-    audioCues: (event.audioCues ?? []).flatMap((cue) => cue.labels ?? []).filter(Boolean),
-  }))
+function compactEvents(events: ReportEvent[], identity: SessionIdentityContract) {
+  return events.slice(0, 16).map((event) => {
+    const scammerText = sanitizeIdentityText(event.scammerText, identity)
+    return {
+      turn: event.turn,
+      scammerText: scammerText.valid
+        ? scammerText.text.slice(0, 140)
+        : "本轮身份冲突内容已从总结材料中省略。",
+      userText: event.userText.slice(0, 120),
+      trigger: event.trigger,
+      evaluation: event.evaluation,
+      reason: event.reason,
+      audioCues: (event.audioCues ?? []).flatMap((cue) => cue.labels ?? []).filter(Boolean),
+    }
+  })
 }
 
 function buildPrompt(body: ReportRequest) {
+  const identity = normalizeIdentityContract(body.scenario.variant?.identityContract, body.scenario.variant ?? {}) as SessionIdentityContract
   return [
     "你是一个面向老年人反诈骗训练系统的训练教练。",
     "请根据本场训练数据，生成简洁、温和、可执行的中文训练总结。",
     "不要编造不存在的对话，不要改变评分，不要输出诈骗操作教程。",
+    ...identityPromptLines(identity),
+    "报告中的人物、亲属关系、姓名和称谓必须遵守以上身份契约，不得自行补充其他人物。",
     "请严格输出 JSON，不要 Markdown，不要额外解释。JSON 格式如下：",
     '{"summary":"本场总体表现总结，80-140字","improvements":["改进点1","改进点2"],"elderAdvice":"给长辈的一段口语化建议，60-120字","nextTraining":"下一次训练建议，40-80字","familyBriefing":"给子女或社区工作人员的简短说明，60-100字，包含本场风险表现和陪练建议"}',
     "\n场景信息：",
@@ -98,7 +114,7 @@ function buildPrompt(body: ReportRequest) {
     "\n训练指标：",
     JSON.stringify(body.metrics, null, 2),
     "\n关键对话记录：",
-    JSON.stringify(compactEvents(body.events), null, 2),
+    JSON.stringify(compactEvents(body.events, identity), null, 2),
   ].join("\n")
 }
 
@@ -160,6 +176,10 @@ async function askDeepSeekReport(body: ReportRequest): Promise<AiReport> {
     if (!report.summary || report.improvements.length === 0 || !report.elderAdvice || !report.nextTraining) {
       throw new Error("DeepSeek report JSON is incomplete")
     }
+    const identity = normalizeIdentityContract(body.scenario.variant?.identityContract, body.scenario.variant ?? {}) as SessionIdentityContract
+    const reportText = [report.summary, ...report.improvements, report.elderAdvice, report.nextTraining, report.familyBriefing].join(" ")
+    const conflicts = findIdentityConflicts(reportText, identity)
+    if (conflicts.length) throw new Error(`DeepSeek report identity conflict: ${conflicts.join("、")}`)
     return report
   })
 }

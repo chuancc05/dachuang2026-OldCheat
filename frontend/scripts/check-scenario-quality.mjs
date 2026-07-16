@@ -2,6 +2,7 @@ import fs from "node:fs"
 import path from "node:path"
 import process from "node:process"
 import { fileURLToPath } from "node:url"
+import { validateIdentityContract } from "../lib/scenario-identity.mjs"
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const frontendRoot = path.resolve(scriptDir, "..")
@@ -108,6 +109,10 @@ for (const code of EXPECTED_CODES) {
     const variantText = [variant.opening, ...(variant.fallbackLines ?? [])].join(" ")
     if (SENSITIVE_PATTERN.test(variantText)) addIssue(errors, "error", code, "story-variant-sensitive", `${variant.id} 疑似包含真实联系方式、链接或账号。`)
     if (!Array.isArray(variant.fallbackLines) || variant.fallbackLines.length < 1) addIssue(errors, "error", code, "story-variant-fallback", `${variant.id} 缺少 fallback 话术。`)
+    const identityValidation = validateIdentityContract(variant.identityContract, variant)
+    for (const detail of identityValidation.errors) {
+      addIssue(errors, "error", code, "identity-contract", `${variant.id}：${detail}`)
+    }
   }
   if (!scene) {
     addIssue(errors, "error", code, "missing-scene", "动态场景库中缺少该场景。")
