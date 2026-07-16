@@ -102,7 +102,7 @@ check("身份契约隔离 RAG、模型、兜底与语音音色", () => {
   assert.match(chat, /sanitizeRagContextForIdentity/u, "训练对话未在 RAG 注入前净化身份")
   assert.match(chat, /identityCorrectionPrompt/u, "训练对话未在模型回复冲突时请求纠正")
   assert.match(chat, /IDENTITY_CORRECTION_ENABLED/u, "身份纠正缺少可关闭的稳定性开关")
-  assert.match(report, /findIdentityConflicts/u, "训练报告未拦截身份冲突内容")
+  assert.match(report, /findReportIdentityConflicts/u, "训练报告未按报告语境拦截身份冲突内容")
   assert.match(selector, /sanitizeIdentityText/u, "场景库兜底未净化身份冲突文本")
   assert.match(audio, /identityContract/u, "场景语音没有读取锁定身份")
   assert.match(voices, /identityContract\.caller\.voiceProfile/u, "场景音色没有读取锁定音色档案")

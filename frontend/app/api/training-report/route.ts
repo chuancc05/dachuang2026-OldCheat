@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import {
-  findIdentityConflicts,
+  findReportIdentityConflicts,
   identityPromptLines,
   normalizeIdentityContract,
   sanitizeIdentityText,
@@ -106,7 +106,8 @@ function buildPrompt(body: ReportRequest) {
     "请根据本场训练数据，生成简洁、温和、可执行的中文训练总结。",
     "不要编造不存在的对话，不要改变评分，不要输出诈骗操作教程。",
     ...identityPromptLines(identity),
-    "报告中的人物、亲属关系、姓名和称谓必须遵守以上身份契约，不得自行补充其他人物。",
+    "报告中的具体人物、亲属关系、姓名和称谓必须遵守以上身份契约，不得自行补充或替换事件对象。",
+    "“家人”“亲属”“子女”“下方建议”等是泛化复盘措辞，可以用于陪练建议；但不得把事件对象改成其他具体亲属或姓名。",
     "请严格输出 JSON，不要 Markdown，不要额外解释。JSON 格式如下：",
     '{"summary":"本场总体表现总结，80-140字","improvements":["改进点1","改进点2"],"elderAdvice":"给长辈的一段口语化建议，60-120字","nextTraining":"下一次训练建议，40-80字","familyBriefing":"给子女或社区工作人员的简短说明，60-100字，包含本场风险表现和陪练建议"}',
     "\n场景信息：",
@@ -178,7 +179,7 @@ async function askDeepSeekReport(body: ReportRequest): Promise<AiReport> {
     }
     const identity = normalizeIdentityContract(body.scenario.variant?.identityContract, body.scenario.variant ?? {}) as SessionIdentityContract
     const reportText = [report.summary, ...report.improvements, report.elderAdvice, report.nextTraining, report.familyBriefing].join(" ")
-    const conflicts = findIdentityConflicts(reportText, identity)
+    const conflicts = findReportIdentityConflicts(reportText, identity)
     if (conflicts.length) throw new Error(`DeepSeek report identity conflict: ${conflicts.join("、")}`)
     return report
   })

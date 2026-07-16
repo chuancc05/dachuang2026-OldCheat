@@ -9,6 +9,8 @@ const RELATION_TERMS = [
   "哥哥", "弟弟", "孩子", "家人", "亲属",
 ]
 
+const GENERIC_REPORT_RELATION_TERMS = new Set(["家人", "亲属"])
+
 const KNOWN_CALLER_NAMES = [
   "小王", "小李", "小张", "小赵", "小陈", "小军", "李华", "王强", "阿强",
   "陈主任", "张主任",
@@ -233,6 +235,22 @@ export function findIdentityConflicts(value, contractValue) {
   return [...new Set([
     ...contract.forbiddenTerms.filter((term) => containsTerm(text, term)),
     ...unexpectedRelationTerms(text, contract),
+    ...unexpectedCallerNames(text, contract),
+  ])]
+}
+
+/**
+ * Report prose may safely use generic support words such as "家人" and "亲属".
+ * It must still reject a changed event relationship, caller name, or forbidden
+ * gendered identity from the locked training session.
+ */
+export function findReportIdentityConflicts(value, contractValue) {
+  const text = stringValue(value)
+  if (!text) return []
+  const contract = normalizeIdentityContract(contractValue)
+  return [...new Set([
+    ...contract.forbiddenTerms.filter((term) => containsTerm(text, term)),
+    ...unexpectedRelationTerms(text, contract).filter((term) => !GENERIC_REPORT_RELATION_TERMS.has(term)),
     ...unexpectedCallerNames(text, contract),
   ])]
 }

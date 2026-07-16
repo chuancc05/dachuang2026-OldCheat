@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises"
 
 import {
   findIdentityConflicts,
+  findReportIdentityConflicts,
   identityPromptLines,
   normalizeIdentityContract,
   sanitizeIdentityText,
@@ -39,6 +40,16 @@ assert.equal(daughterIdentity.subject.name, "小雪")
 assert.equal(daughterIdentity.distressCue?.enabled, true)
 assert.equal(daughterIdentity.distressCue?.text, "救救我……我好害怕……")
 assert.deepEqual(findIdentityConflicts("你儿子现在在我们手上。", daughterIdentity), ["儿子"])
+assert.deepEqual(
+  findReportIdentityConflicts("建议家人陪同复盘，并参考下方建议继续训练。", daughterIdentity),
+  [],
+  "report may use generic family and guidance wording",
+)
+assert.deepEqual(
+  findReportIdentityConflicts("建议您联系儿子一起核实。", daughterIdentity),
+  ["儿子"],
+  "report must still reject a changed specific relative",
+)
 assert.ok(identityPromptLines(daughterIdentity).join("\n").includes("女儿小雪"))
 
 const rag = {
@@ -97,6 +108,7 @@ const baseScenario = {
 }
 const applied = applyStoryVariant(baseScenario, sc14v1)
 assert.equal(applied.variant.identityContract.subject.name, "小雪")
+assert.equal(applied.script.length, 6, "story variant must keep at least six recommended turns")
 for (let index = 0; index < applied.script.length * 3; index += 1) {
   const line = applied.script[index % applied.script.length].line
   assert.equal(

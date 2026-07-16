@@ -6,6 +6,7 @@ import { applyStoryVariant, selectStoryVariant } from "../lib/story-variant-sele
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const library = JSON.parse(fs.readFileSync(path.join(root, "data", "story-variants.json"), "utf8"))
+const scenarioLibrary = JSON.parse(fs.readFileSync(path.join(root, "data", "scenario_library.json"), "utf8"))
 const ids = new Set()
 const unsafe = /https?:\/\/|\bwww\.|\b1[3-9]\d{9}\b|(?:账号|账户|银行卡)\s*[：:]?\s*\d{8,}/u
 assert.equal(library.variants.length, 42, "14 个场景应各有 3 个种子变体")
@@ -37,6 +38,44 @@ assert.equal(
 )
 assert.equal(selectStoryVariant([sc01[0]], "SC-01", ["SC-01-V01"], () => 0)?.id, "SC-01-V01", "单变体时应安全退化")
 assert.equal(selectStoryVariant(sc01, "SC-14", [], () => 0), null, "无匹配场景时应返回 null")
+
+function expectedTurns(difficulty = "中难度") {
+  if (difficulty.includes("高")) return 9
+  if (difficulty.includes("低") && difficulty.includes("中")) return 7
+  if (difficulty.includes("低")) return 6
+  return 8
+}
+
+for (const scene of scenarioLibrary.scenes) {
+  const targetTurns = expectedTurns(scene.difficulty)
+  const base = {
+    id: scene.id.toLowerCase(),
+    code: scene.id,
+    title: scene.name,
+    difficulty: scene.difficulty?.includes("高") ? "高" : scene.difficulty?.includes("低") ? "低" : "中",
+    channel: "phone",
+    persona: "原人物",
+    avatar: "测",
+    source: "测试来源",
+    tagline: "测试背景",
+    method: scene.core_tactics,
+    script: Array.from({ length: targetTurns }, (_, index) => ({
+      line: `基础话术${index + 1}`,
+      trigger: `基础触发${index + 1}`,
+      riskDelta: index + 1,
+      coach: `基础建议${index + 1}`,
+    })),
+  }
+  for (const variant of library.variants.filter((item) => item.enabled && item.scenarioCode === scene.id)) {
+    const appliedScenario = applyStoryVariant(base, variant)
+    assert.equal(
+      appliedScenario.script.length,
+      targetTurns,
+      `${variant.id} 不得将 ${scene.id} 的建议轮次缩短为 ${appliedScenario.script.length}`,
+    )
+  }
+}
+
 const baseScenario = {
   id: "sc-01",
   code: "SC-01",
@@ -48,12 +87,18 @@ const baseScenario = {
   source: "原来源",
   tagline: "原背景",
   method: "原手法",
-  script: [{ line: "原开场", trigger: "原触发", riskDelta: 2, coach: "原建议" }],
+  script: Array.from({ length: 8 }, (_, index) => ({
+    line: `原话术${index + 1}`,
+    trigger: `原触发${index + 1}`,
+    riskDelta: index + 2,
+    coach: `原建议${index + 1}`,
+  })),
 }
 const applied = applyStoryVariant(baseScenario, sc01[0])
 assert.equal(applied.persona, sc01[0].persona, "会话人物必须来自锁定变体")
 assert.equal(applied.tagline, sc01[0].premise, "会话背景必须来自锁定变体")
 assert.equal(applied.script[0].line, sc01[0].opening, "首句必须来自锁定变体")
 assert.equal(applied.script[1].line, sc01[0].fallbackLines[0], "模型失败时必须优先使用同变体 fallback")
+assert.equal(applied.script.length, baseScenario.script.length, "变体不得缩短原场景建议轮次")
 assert.equal(applied.variant.id, sc01[0].id, "会话必须保留变体快照")
 console.log("PASS 42 个故事变体结构、安全与可执行防重复门禁")
